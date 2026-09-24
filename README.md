@@ -55,7 +55,7 @@ codu
 
 ### Homebrew
 
-发布 `v0.1.0` 并将公式同步到 tap 后，可使用：
+通过 `ActivationEnergy/cask` tap 安装：
 
 ```console
 brew tap ActivationEnergy/cask
@@ -258,7 +258,7 @@ ruff check codu test_codu
 
 - [x] 使用 MIT 许可证并在仓库根目录添加 `LICENSE`
 - [x] 增加 CI（Python 3.11–3.14、Linux、Ruff 和单元测试）
-- [ ] 创建 `ActivationEnergy/codu`，发布 `v0.1.0`，并将 Formula 同步到 `ActivationEnergy/homebrew-cask`
+- [x] 创建 `ActivationEnergy/codu`，发布 `v0.1.0`，并将 Formula 同步到 `ActivationEnergy/homebrew-cask`
 - [ ] 增加真实但已脱敏的终端截图或演示
 - [ ] 确认仓库中没有真实 Codex 会话、凭据或本地路径数据
 

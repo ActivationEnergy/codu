@@ -55,7 +55,7 @@ Add `~/.local/bin` to `PATH` if your shell does not already include it.
 
 ### Homebrew
 
-After publishing `v0.1.0` and syncing the formula to the tap:
+Install through the `ActivationEnergy/cask` tap:
 
 ```console
 brew tap ActivationEnergy/cask
@@ -256,7 +256,7 @@ Issues and pull requests are welcome. When fixing a bug or changing behavior:
 
 - [x] Use the MIT License and add `LICENSE` at the repository root
 - [x] Add CI for Python 3.11–3.14 on Linux with Ruff and unit tests
-- [ ] Create `ActivationEnergy/codu`, publish `v0.1.0`, and sync the formula to `ActivationEnergy/homebrew-cask`
+- [x] Create `ActivationEnergy/codu`, publish `v0.1.0`, and sync the formula to `ActivationEnergy/homebrew-cask`
 - [ ] Add a real but redacted terminal screenshot or demo
 - [ ] Confirm the repository contains no real Codex transcripts, credentials, or local-path data
 
