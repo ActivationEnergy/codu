@@ -50,3 +50,32 @@ jobs:
           codu --version
           codu --help
           python -c "import curses"
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Verify tag matches package version
+        run: >-
+          python -c "import codu, os; actual = os.environ['GITHUB_REF_NAME'];
+          expected = f'v{codu.__version__}';
+          assert actual == expected,
+          f'tag {actual} does not match {expected}'"
+      - name: Build release packages
+        run: |
+          python -m pip install build
+          python -m build --outdir dist
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
