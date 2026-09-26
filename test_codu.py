@@ -78,7 +78,7 @@ for line in sys.stdin:
         script.write_text(program, encoding="utf-8")
         launcher = directory / "codex.cmd"
         command = subprocess.list2cmdline([sys.executable, str(script)])
-        launcher.write_text(f"@{command} %*\r\n", encoding="utf-8")
+        launcher.write_text(f"@{command} %*\n", encoding="utf-8")
         return launcher
 
     launcher = directory / "codex"
