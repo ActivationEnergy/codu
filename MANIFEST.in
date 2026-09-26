@@ -1,0 +1,3 @@
+include codu
+include README.en.md
+recursive-include packaging *.rb
