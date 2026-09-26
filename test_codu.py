@@ -152,7 +152,9 @@ class CoduTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(values[0]["session_id"], "session-a")
             self.assertEqual(values[0]["cwd"], str(root))
-            self.assertTrue(values[0]["path"].endswith("sessions/a.jsonl"))
+            self.assertEqual(
+                Path(values[0]["path"]), root / "sessions" / "a.jsonl"
+            )
 
     def test_app_server_thread_fields_include_runtime_status_and_size(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
