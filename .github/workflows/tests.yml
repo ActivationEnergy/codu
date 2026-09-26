@@ -10,11 +10,27 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: ubuntu-latest
+            python-version: "3.14"
+          - os: macos-latest
+            python-version: "3.11"
+          - os: macos-latest
+            python-version: "3.14"
+          - os: windows-latest
+            python-version: "3.11"
+          - os: windows-latest
+            python-version: "3.14"
 
     steps:
       - uses: actions/checkout@v7
@@ -22,8 +38,44 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install validation tools
-        run: python -m pip install ruff
+        run: python -m pip install . build ruff
       - name: Static checks
-        run: ruff check codu test_codu.py
+        run: ruff check codu.py test_codu.py
       - name: Unit tests
         run: python -W error::ResourceWarning -m unittest -v
+      - name: Build package
+        run: python -m build --outdir dist
+      - name: CLI smoke test
+        run: |
+          codu --version
+          codu --help
+          python -c "import curses"
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Verify tag matches package version
+        run: >-
+          python -c "import codu, os; actual = os.environ['GITHUB_REF_NAME'];
+          expected = f'v{codu.__version__}';
+          assert actual == expected,
+          f'tag {actual} does not match {expected}'"
+      - name: Build release packages
+        run: |
+          python -m pip install build
+          python -m build --outdir dist
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --title "$GITHUB_REF_NAME" --generate-notes --verify-tag

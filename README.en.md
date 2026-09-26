@@ -20,7 +20,7 @@ This is an unofficial community project and is not affiliated with OpenAI.
 - Resume the selected Codex session directly from the browser
 - Non-interactive TSV and JSON output
 - Codex app-server first, with a local transcript scan fallback
-- Python standard library only
+- Python standard library only on macOS and Linux; `windows-curses` on Windows
 
 ## Requirements
 
@@ -28,41 +28,59 @@ This is an unofficial community project and is not affiliated with OpenAI.
 | --- | --- |
 | Python | 3.11 or newer |
 | Codex CLI | The `codex` command is on `PATH` and configured normally |
-| Interactive terminal | A terminal with `curses` support on macOS or Linux |
+| Interactive terminal | macOS, Linux, or Windows Terminal (x64) |
 
-Standard Python installations on Windows usually do not include `curses`. `--plain` and `--json` still work, but the full-screen UI is not officially supported on Windows yet.
+Package installation automatically installs `windows-curses` on Windows. When running directly from source with a Python build that cannot import `curses`, run `py -m pip install windows-curses` first. The `--plain` and `--json` modes do not require a full-screen terminal.
+Native Windows support currently targets x64 Python because `windows-curses` does not provide a native ARM64 wheel.
 
 Session operations require the Codex CLI commands `app-server`, `archive`, `unarchive`, `delete`, and `resume`. Capabilities can differ between Codex versions.
 
 ## Installation
 
-Run the script directly from the repository:
+### Homebrew (macOS, recommended)
 
-```console
-chmod +x codu
-./codu
-```
-
-Or install it in your personal command directory:
-
-```console
-mkdir -p ~/.local/bin
-install -m 755 codu ~/.local/bin/codu
-codu
-```
-
-Add `~/.local/bin` to `PATH` if your shell does not already include it.
-
-### Homebrew
-
-After publishing `v0.1.0` and syncing the formula to the tap:
+Install through the `ActivationEnergy/cask` tap:
 
 ```console
 brew tap ActivationEnergy/cask
 brew install codu
 ```
 
-The formula source is [`packaging/homebrew/codu.rb`](packaging/homebrew/codu.rb). It downloads one versioned `codu`, verifies its SHA256, and runs it with Homebrew Python; it does not build a Python package.
+The formula source is [`packaging/homebrew/codu.rb`](packaging/homebrew/codu.rb). It downloads one versioned single-file entry point, verifies its SHA256, and runs it with Homebrew Python; it does not build a Python package.
+
+### uv / pip / pipx (Windows and Linux)
+
+The recommended path is to install the versioned universal wheel with `uv`:
+
+```console
+uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.2.0/codu-0.2.0-py3-none-any.whl
+codu --version
+```
+
+Regular `pip` and `pipx` are also supported:
+
+```console
+python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.2.0/codu-0.2.0-py3-none-any.whl
+pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.2.0/codu-0.2.0-py3-none-any.whl
+```
+
+On Windows, use Windows Terminal with PowerShell; replace `python` with `py` in the command above when needed.
+
+### Run from source
+
+On macOS or Linux:
+
+```console
+chmod +x codu
+./codu
+```
+
+On Windows PowerShell:
+
+```powershell
+py -m pip install .
+codu
+```
 
 ## Quick start
 
@@ -90,7 +108,7 @@ When stdin or stdout is not a terminal, codu automatically uses the `--plain` fo
 ## Command-line interface
 
 ```text
-usage: codu [-h] [--json | --plain] [--verbose] [directory]
+usage: codu [-h] [--json | --plain] [--verbose] [--version] [directory]
 ```
 
 | Argument | Description |
@@ -99,6 +117,7 @@ usage: codu [-h] [--json | --plain] [--verbose] [directory]
 | `--plain` | Print tab-separated rows instead of opening the full-screen UI |
 | `--json` | Print complete JSON, including byte sizes and transcript paths |
 | `--verbose` | Explain app-server failure and file-scan fallback on stderr |
+| `--version` | Show the codu version |
 | `-h`, `--help` | Show help |
 
 ## Interactive keys
@@ -199,7 +218,9 @@ Archive uncertain sessions first, then delete them only after confirming they ar
 - SIZE counts only the current thread JSONL file. It excludes attachments, generated images, caches, and descendant threads that deletion may also remove; it is not an exact “disk space reclaimed” value.
 - A newly started local app-server only knows its own runtime state and may not see activity in other Codex processes.
 - The file-scan fallback depends on Codex's current local JSONL format and may require updates when that format changes.
-- The full-screen UI has mainly been tested on macOS. Windows full-screen mode is not yet supported.
+- Windows full-screen mode targets Windows Terminal and PowerShell; legacy console hosts are not supported.
+- Native Windows on ARM64 Python is not yet supported; ARM devices can use an emulated x64 Python environment.
+- Automated tests cover installation, `curses` import, and core logic on all three platforms, but the complete terminal key state machine still requires manual terminal testing.
 - app-server requests and delete/archive operations time out after 30 seconds by default. Interactive `resume` is intentionally not subject to that timeout.
 
 ## Troubleshooting
@@ -235,13 +256,14 @@ Use a UTF-8 locale and a terminal font with proper wide-character support. codu 
 ## Development and verification
 
 ```console
+python3 -m pip install -e .
 python3 -m unittest -v
 
 # Optional
-ruff check codu test_codu
+ruff check codu.py test_codu.py
 ```
 
-Current tests cover discovery, directory filtering, renamed-title and preview fallback, timestamp parsing, JSON output, app-server mapping and lifecycle, request timeout, stderr draining, selection preservation after archive, filtering and sorting, wide-character clipping, and confirmation key mapping. Real archive/delete operations and the complete curses state machine still need automated coverage.
+CI runs on Linux, macOS, and Windows with Python 3.11 and 3.14, plus Python 3.12 and 3.13 on Linux. Current tests cover discovery, directory filtering, renamed-title and preview fallback, timestamp parsing, JSON output, app-server mapping and lifecycle, request timeout, stderr draining, selection preservation after archive, cross-platform resume invocation, filtering and sorting, wide-character clipping, and confirmation key mapping. Real archive/delete operations and the complete curses state machine still need automated coverage.
 
 ## Contributing
 
@@ -249,14 +271,14 @@ Issues and pull requests are welcome. When fixing a bug or changing behavior:
 
 1. Include the reproducible Codex CLI version, Python version, and operating system.
 2. Add a regression test for important behavior changes and bug fixes.
-3. Run `python3 -m unittest -v`, plus Ruff when available.
+3. Run `python3 -m unittest -v`, plus `ruff check codu.py test_codu.py` when Ruff is available.
 4. Never include real session content, access tokens, or other sensitive data in issues or fixtures.
 
 ## Pre-release checklist
 
 - [x] Use the MIT License and add `LICENSE` at the repository root
-- [x] Add CI for Python 3.11–3.14 on Linux with Ruff and unit tests
-- [ ] Create `ActivationEnergy/codu`, publish `v0.1.0`, and sync the formula to `ActivationEnergy/homebrew-cask`
+- [x] Add CI for Python 3.11–3.14 on Linux/macOS/Windows with Ruff and unit tests
+- [x] Create `ActivationEnergy/codu`, publish `v0.1.0`, and sync the formula to `ActivationEnergy/homebrew-cask`
 - [ ] Add a real but redacted terminal screenshot or demo
 - [ ] Confirm the repository contains no real Codex transcripts, credentials, or local-path data
 

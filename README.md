@@ -20,7 +20,7 @@
 - 从浏览器直接进入选中的 Codex 会话
 - 支持 TSV 与 JSON 非交互输出
 - 优先使用 Codex app-server；不可用时回退到本地会话文件扫描
-- 仅依赖 Python 标准库
+- macOS 与 Linux 仅依赖 Python 标准库；Windows 使用 `windows-curses`
 
 ## 要求
 
@@ -28,41 +28,59 @@
 | --- | --- |
 | Python | 3.11 或更高版本 |
 | Codex CLI | `codex` 命令在 `PATH` 中，并已完成正常配置 |
-| 交互终端 | macOS 或 Linux 上支持 `curses` 的终端 |
+| 交互终端 | macOS、Linux，或 Windows Terminal（x64） |
 
-Windows 的标准 Python 通常不自带 `curses`。此时仍可使用 `--plain` 和 `--json`；全屏交互界面目前未正式支持 Windows。
+通过 Python 包安装时，Windows 会自动安装 `windows-curses`。如果直接运行源码且 Python 无法导入 `curses`，请先运行 `py -m pip install windows-curses`；`--plain` 和 `--json` 不依赖全屏终端。
+Windows 原生支持以 x64 Python 为基线；`windows-curses` 当前没有原生 ARM64 wheel。
 
 会话操作依赖 Codex CLI 提供的 `app-server`、`archive`、`unarchive`、`delete` 和 `resume` 命令。不同 Codex 版本的能力可能不同。
 
 ## 安装
 
-直接运行仓库中的脚本：
+### Homebrew（macOS，推荐）
 
-```console
-chmod +x codu
-./codu
-```
-
-也可以安装到个人命令目录：
-
-```console
-mkdir -p ~/.local/bin
-install -m 755 codu ~/.local/bin/codu
-codu
-```
-
-如果 `~/.local/bin` 不在 `PATH` 中，请按你的 shell 配置将它加入 `PATH`。
-
-### Homebrew
-
-发布 `v0.1.0` 并将公式同步到 tap 后，可使用：
+通过 `ActivationEnergy/cask` tap 安装：
 
 ```console
 brew tap ActivationEnergy/cask
 brew install codu
 ```
 
-Formula 源文件位于 [`packaging/homebrew/codu.rb`](packaging/homebrew/codu.rb)。它下载固定版本的单个 `codu`，校验 SHA256，并使用 Homebrew 的 Python 运行；不构建 Python 包。
+Formula 源文件位于 [`packaging/homebrew/codu.rb`](packaging/homebrew/codu.rb)。它下载固定版本的单文件入口，校验 SHA256，并使用 Homebrew 的 Python 运行；不构建 Python 包。
+
+### uv / pip / pipx（Windows、Linux）
+
+推荐用 `uv` 安装固定版本的通用 wheel：
+
+```console
+uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.2.0/codu-0.2.0-py3-none-any.whl
+codu --version
+```
+
+也支持普通 `pip` 或 `pipx`：
+
+```console
+python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.2.0/codu-0.2.0-py3-none-any.whl
+pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.2.0/codu-0.2.0-py3-none-any.whl
+```
+
+Windows 推荐使用 Windows Terminal 和 PowerShell；在 PowerShell 中可将 `python` 替换为 `py`。
+
+### 从源码运行
+
+macOS 或 Linux：
+
+```console
+chmod +x codu
+./codu
+```
+
+Windows PowerShell：
+
+```powershell
+py -m pip install .
+codu
+```
 
 ## 快速开始
 
@@ -90,7 +108,7 @@ codu /path/to/project --json
 ## 命令行参数
 
 ```text
-usage: codu [-h] [--json | --plain] [--verbose] [directory]
+usage: codu [-h] [--json | --plain] [--verbose] [--version] [directory]
 ```
 
 | 参数 | 说明 |
@@ -99,6 +117,7 @@ usage: codu [-h] [--json | --plain] [--verbose] [directory]
 | `--plain` | 输出制表符分隔列表，不进入全屏界面 |
 | `--json` | 输出完整 JSON，包括字节数与会话文件路径 |
 | `--verbose` | 在 stderr 显示 app-server 失败与文件扫描回退原因 |
+| `--version` | 显示 codu 版本 |
 | `-h`, `--help` | 显示帮助 |
 
 ## 交互快捷键
@@ -199,7 +218,9 @@ codu --plain | column -t -s $'\t'
 - SIZE 仅统计当前线程对应的 JSONL 文件，不包含附件、生成图片、缓存，也不包含删除时可能一并移除的派生子线程；它不是精确的“可释放磁盘空间”。
 - 新启动的本地 app-server 只能报告自身的运行状态，可能看不到其他 Codex 进程的活动。
 - 文件扫描回退依赖 Codex 当前的本地 JSONL 格式；该内部格式变化时可能需要适配。
-- 交互界面目前主要在 macOS 上验证；Windows 全屏模式尚未支持。
+- Windows 全屏模式面向 Windows Terminal 与 PowerShell；旧版控制台宿主不在支持范围内。
+- Windows 原生 ARM64 Python 尚不支持；ARM 设备可使用 x64 Python 模拟环境。
+- 自动化测试覆盖三平台的安装、`curses` 导入和核心逻辑，但完整终端按键状态机仍需要人工终端验证。
 - app-server 请求及删除/归档操作默认 30 秒超时；`resume` 是交互操作，不应用该超时。
 
 ## 故障排查
@@ -237,13 +258,14 @@ codex unarchive --help
 ## 开发与验证
 
 ```console
+python3 -m pip install -e .
 python3 -m unittest -v
 
 # 可选
-ruff check codu test_codu
+ruff check codu.py test_codu.py
 ```
 
-当前测试覆盖会话发现、目录筛选、重命名与简介回退、时间解析、JSON 输出、app-server 字段映射与生命周期、请求超时、stderr 排空、归档后选择保持、搜索排序、宽字符裁剪以及删除确认按键。真实归档/删除和完整 curses 状态机仍需要更多自动化覆盖。
+CI 在 Linux、macOS 和 Windows 的 Python 3.11 与 3.14 上运行，并额外覆盖 Linux 的 Python 3.12 与 3.13。当前测试覆盖会话发现、目录筛选、重命名与简介回退、时间解析、JSON 输出、app-server 字段映射与生命周期、请求超时、stderr 排空、归档后选择保持、跨平台恢复命令、搜索排序、宽字符裁剪以及删除确认按键。真实归档/删除和完整 curses 状态机仍需要更多自动化覆盖。
 
 ## 贡献
 
@@ -251,14 +273,14 @@ ruff check codu test_codu
 
 1. 说明可复现的 Codex CLI 版本、Python 版本和操作系统。
 2. 为重要行为变更或 bug 修复添加回归测试。
-3. 运行 `python3 -m unittest -v`；如果安装了 Ruff，再运行静态检查。
+3. 运行 `python3 -m unittest -v`；如果安装了 Ruff，再运行 `ruff check codu.py test_codu.py`。
 4. 不要在 issue 或测试夹具中提交真实会话内容、访问令牌或其他敏感信息。
 
 ## 开源发布前检查
 
 - [x] 使用 MIT 许可证并在仓库根目录添加 `LICENSE`
-- [x] 增加 CI（Python 3.11–3.14、Linux、Ruff 和单元测试）
-- [ ] 创建 `ActivationEnergy/codu`，发布 `v0.1.0`，并将 Formula 同步到 `ActivationEnergy/homebrew-cask`
+- [x] 增加 CI（Python 3.11–3.14、Linux/macOS/Windows、Ruff 和单元测试）
+- [x] 创建 `ActivationEnergy/codu`，发布 `v0.1.0`，并将 Formula 同步到 `ActivationEnergy/homebrew-cask`
 - [ ] 增加真实但已脱敏的终端截图或演示
 - [ ] 确认仓库中没有真实 Codex 会话、凭据或本地路径数据
 

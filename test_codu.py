@@ -1,6 +1,4 @@
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import json
 import os
@@ -9,15 +7,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-CODU_PATH = Path(__file__).with_name("codu")
-loader = importlib.machinery.SourceFileLoader("codu", str(CODU_PATH))
-spec = importlib.util.spec_from_loader(loader.name, loader)
-assert spec is not None
-codu = importlib.util.module_from_spec(spec)
-sys.modules[loader.name] = codu
-loader.exec_module(codu)
+import codu
 
 
 def write_session(
@@ -63,6 +55,36 @@ def write_session(
         "not-json\n" + "\n".join(json.dumps(event) for event in events) + "\n",
         encoding="utf-8",
     )
+
+
+def write_fake_codex(directory: Path) -> Path:
+    """Create a cross-platform fake Codex executable for transport tests."""
+    program = """\
+import json
+import sys
+
+for line in sys.stdin:
+    message = json.loads(line)
+    if "id" not in message:
+        continue
+    if message.get("method") == "thread/list":
+        result = {"data": [], "nextCursor": None}
+    else:
+        result = {}
+    print(json.dumps({"id": message["id"], "result": result}), flush=True)
+"""
+    if os.name == "nt":
+        script = directory / "fake_codex.py"
+        script.write_text(program, encoding="utf-8")
+        launcher = directory / "codex.cmd"
+        command = subprocess.list2cmdline([sys.executable, str(script)])
+        launcher.write_text(f"@{command} %*\n", encoding="utf-8")
+        return launcher
+
+    launcher = directory / "codex"
+    launcher.write_text(f"#!{sys.executable}\n{program}", encoding="utf-8")
+    launcher.chmod(0o755)
+    return launcher
 
 
 class CoduTests(unittest.TestCase):
@@ -130,7 +152,9 @@ class CoduTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(values[0]["session_id"], "session-a")
             self.assertEqual(values[0]["cwd"], str(root))
-            self.assertTrue(values[0]["path"].endswith("sessions/a.jsonl"))
+            self.assertEqual(
+                Path(values[0]["path"]), root / "sessions" / "a.jsonl"
+            )
 
     def test_app_server_thread_fields_include_runtime_status_and_size(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -158,6 +182,18 @@ class CoduTests(unittest.TestCase):
             self.assertEqual(session.title, "Renamed session")
             self.assertEqual(session.status, "active:waitingOnApproval")
             self.assertEqual(session.size_bytes, 5)
+
+    def test_app_server_launches_platform_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            executable = write_fake_codex(Path(temp))
+
+            with (
+                patch.dict(os.environ, {"CODEX_BIN": ""}),
+                patch.object(codu.shutil, "which", return_value=str(executable)),
+            ):
+                sessions = codu.discover_sessions_from_app_server()
+
+            self.assertEqual(sessions, [])
 
     def test_browser_filter_sort_and_wide_character_clipping(self) -> None:
         first = codu.Session(
@@ -278,6 +314,44 @@ class CoduTests(unittest.TestCase):
 
         self.assertFalse(success)
         self.assertIn("超时", message)
+
+    def test_resume_uses_the_session_working_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            session = codu.Session(
+                updated=codu.datetime.now(codu.UTC),
+                state="active",
+                status="notLoaded",
+                session_id="session-a",
+                size_bytes=0,
+                title="Session",
+                cwd=temp,
+                path=None,
+            )
+            browser = codu.SessionBrowser(Mock(), [session])
+            result = subprocess.CompletedProcess([], 0)
+
+            with (
+                patch.object(codu, "codex_executable", return_value="codex"),
+                patch.object(subprocess, "run", return_value=result) as run,
+                patch("curses.def_prog_mode"),
+                patch("curses.endwin"),
+                patch("curses.reset_prog_mode"),
+            ):
+                browser.resume_current()
+
+            run.assert_called_once_with(
+                ["codex", "resume", "session-a"], cwd=temp, check=False
+            )
+            browser.screen.refresh.assert_called_once_with()
+
+    def test_version_flag_reports_package_version(self) -> None:
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as error:
+            codu.main(["--version"])
+
+        self.assertEqual(error.exception.code, 0)
+        self.assertEqual(output.getvalue().strip(), f"codu {codu.__version__}")
 
 
 if __name__ == "__main__":
