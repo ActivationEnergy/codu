@@ -7,6 +7,7 @@ import os
 import queue
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -43,7 +44,7 @@ INJECTED_USER_PREFIXES = (
 )
 
 DEFAULT_OPERATION_TIMEOUT = 30.0
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,194 @@ class Session:
     title: str
     cwd: str
     path: Path | None
+
+
+@dataclass(frozen=True)
+class DataEntry:
+    """One filesystem entry under CODEX_HOME, without following symlinks."""
+
+    path: Path
+    kind: str
+    size_bytes: int
+    updated: datetime
+    description: str
+    impact: str
+    basis: str
+    action: str
+    complete: bool
+    identity: tuple[int, int]
+
+
+DATA_DESCRIPTIONS = {
+    ".tmp": ("Codex 的临时工作目录，可能包含插件副本和锁文件。", "运行中或未核实的内容不应直接删除。"),
+    "AGENTS.md": ("用户级 Agent 指令。", "删除会失去个人指令。"),
+    "auth.json": ("文件式登录凭据。", "删除可能需要重新登录。"),
+    "config.toml": ("用户级 Codex 配置。", "删除会失去个人设置。"),
+    "history.jsonl": ("本地命令或提示历史记录。", "删除会失去历史记录。"),
+    "session_index.jsonl": ("会话名称等索引。", "应由 Codex 管理。"),
+    "sessions": ("未归档的会话记录。", "请在会话视图通过 Codex 删除。"),
+    "archived_sessions": ("已归档的会话记录。", "请在会话视图通过 Codex 删除。"),
+    "cache": ("Codex 的本地缓存目录。", "仅已识别的子目录可清理。"),
+    "plugins": ("插件安装及其缓存。", "删除可能使插件不可用。"),
+    "skills": ("用户安装或创建的技能。", "删除会失去技能。"),
+    "rules": ("用户级规则。", "删除会失去规则。"),
+    "memories": ("Codex 保存的记忆内容。", "删除会失去记忆。"),
+    "automations": ("本地自动化配置与状态。", "删除可能使自动化失效。"),
+    "attachments": ("会话或工具关联的附件。", "删除可能影响已有会话。"),
+    "generated_images": ("生成的图片文件。", "删除会失去这些图片。"),
+    "computer-use": ("计算机操作功能的数据和组件。", "删除可能影响该功能。"),
+    "shell_snapshots": ("会话使用的 shell 环境快照。", "删除可能影响恢复会话。"),
+    "sqlite": ("Codex 的本地数据库目录。", "数据库文件不能逐个删除。"),
+}
+
+# Only these observed cache locations are offered for cleanup. Other content
+# remains visible but read-only until its lifecycle is verified.
+CLEANABLE_CACHE = {
+    "bundled_plugin_exclusions": "内置插件排除项缓存",
+    "codex_app_directory": "Codex 应用目录缓存",
+    "codex_apps_server_info": "Codex 应用服务信息缓存",
+    "codex_apps_tools": "Codex 应用工具目录缓存",
+    "remote_plugin_catalog": "远程插件目录缓存",
+}
+
+
+def allocated_bytes(info: os.stat_result) -> int:
+    """Use allocated blocks where available, falling back to apparent size."""
+    blocks = getattr(info, "st_blocks", None)
+    return blocks * 512 if blocks is not None else info.st_size
+
+
+def data_size(path: Path, seen: set[tuple[int, int]]) -> tuple[int, bool]:
+    """Measure allocated space, counting hard links once and never following links."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return 0, False
+    identity = (info.st_dev, info.st_ino)
+    if identity in seen:
+        return 0, True
+    seen.add(identity)
+    total = allocated_bytes(info)
+    if not stat.S_ISDIR(info.st_mode):
+        return total, True
+    complete = True
+    try:
+        with os.scandir(path) as children:
+            for child in children:
+                size, ok = data_size(Path(child.path), seen)
+                total += size
+                complete &= ok
+    except OSError:
+        complete = False
+    return total, complete
+
+
+def describe_data_entry(root: Path, path: Path, kind: str) -> tuple[str, str, str, str]:
+    """Return description, impact, evidence level, and permitted action."""
+    parts = path.relative_to(root).parts
+    name = parts[0]
+    if kind == "链接":
+        return "符号链接；目标内容不计入本目录。", "不会在 codu 中删除。", "文件类型", "只读"
+    if len(parts) == 1 and name in {"sessions", "archived_sessions"}:
+        description, impact = DATA_DESCRIPTIONS[name]
+        return description, impact, "Codex 会话接口", "会话"
+    if len(parts) == 2 and name == "cache" and parts[1] in CLEANABLE_CACHE:
+        return (
+            f"{CLEANABLE_CACHE[parts[1]]}；位于 Codex 缓存目录。",
+            "删除后可能需要重新获取；运行中的 Codex 可能再次生成缓存。",
+            "已识别缓存路径",
+            "清理",
+        )
+    if len(parts) == 1 and name in DATA_DESCRIPTIONS:
+        description, impact = DATA_DESCRIPTIONS[name]
+        basis = (
+            "OpenAI 官方配置文档"
+            if name in {"auth.json", "config.toml", "history.jsonl"}
+            else "文件名及本地目录结构"
+        )
+        return description, impact, basis, "只读"
+    if name in {"sessions", "archived_sessions"}:
+        return "会话记录的一部分。", "请在会话视图通过 Codex 删除。", "Codex 会话接口", "只读"
+    if path.name.endswith((".sqlite", ".sqlite-wal", ".sqlite-shm", ".db", ".db-wal", ".db-shm")):
+        return "疑似 Codex 本地数据库或其日志。", "逐个删除可能损坏数据。", "文件名", "只读"
+    if name in DATA_DESCRIPTIONS:
+        return (
+            f"位于 {name}/；具体文件用途未逐项确认。",
+            "删除影响未确认。",
+            "父目录用途",
+            "只读",
+        )
+    return "用途未确认。", "删除影响未确认。", "未确认", "只读"
+
+
+def list_data_entries(root: Path, directory: Path) -> list[DataEntry]:
+    """List one CODEX_HOME level with allocated sizes and conservative actions."""
+    entries: list[DataEntry] = []
+    seen: set[tuple[int, int]] = set()
+    children = list(directory.iterdir())
+    for path in children:
+        try:
+            info = path.lstat()
+        except OSError:
+            continue
+        kind = "链接" if stat.S_ISLNK(info.st_mode) else "目录" if stat.S_ISDIR(info.st_mode) else "文件"
+        description, impact, basis, action = describe_data_entry(root, path, kind)
+        size, complete = data_size(path, seen)
+        entries.append(
+            DataEntry(
+                path=path,
+                kind=kind,
+                size_bytes=size,
+                updated=datetime.fromtimestamp(info.st_mtime, UTC),
+                description=description,
+                impact=impact,
+                basis=basis,
+                action=action if complete else "只读",
+                complete=complete,
+                identity=(info.st_dev, info.st_ino),
+            )
+        )
+    return entries
+
+
+def filter_and_sort_data(
+    entries: Sequence[DataEntry], query: str, sort_key: str, descending: bool
+) -> list[DataEntry]:
+    needle = query.casefold().strip()
+    values = [entry for entry in entries if needle in entry.path.name.casefold()]
+    keys = {
+        "name": lambda entry: entry.path.name.casefold(),
+        "size": lambda entry: entry.size_bytes,
+        "updated": lambda entry: entry.updated,
+        "action": lambda entry: entry.action,
+    }
+    return sorted(values, key=keys[sort_key], reverse=descending)
+
+
+def delete_cache_entry(root: Path, entry: DataEntry) -> tuple[bool, str]:
+    """Delete one recognized cache path after rechecking its identity and location."""
+    path = entry.path
+    if describe_data_entry(root, path, entry.kind)[3] != "清理":
+        return False, "该项目不可清理"
+    try:
+        info = path.lstat()
+        if (info.st_dev, info.st_ino) != entry.identity:
+            return False, "项目已变化，请刷新后重试"
+        if (stat.S_ISDIR(info.st_mode) and entry.kind != "目录") or (
+            stat.S_ISREG(info.st_mode) and entry.kind != "文件"
+        ):
+            return False, "项目类型已变化，请刷新后重试"
+        if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+            return False, "路径已变化，请刷新后重试"
+        if stat.S_ISDIR(info.st_mode):
+            shutil.rmtree(path)
+        elif stat.S_ISREG(info.st_mode):
+            path.unlink()
+        else:
+            return False, "不支持清理此文件类型"
+    except OSError as error:
+        return False, str(error)
+    return True, ""
 
 
 class AppServerError(RuntimeError):
@@ -676,10 +865,15 @@ class SessionBrowser:
     """An ncdu-style curses browser for Codex sessions."""
 
     SORT_KEYS = ("state", "size", "updated", "title", "cwd")
+    DATA_SORT_KEYS = ("name", "size", "updated", "action")
 
-    def __init__(self, screen: object, sessions: Sequence[Session]) -> None:
+    def __init__(
+        self, screen: object, sessions: Sequence[Session], root: Path | None = None
+    ) -> None:
         self.screen = screen
         self.sessions = list(sessions)
+        self.root = root or Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
+        self.view = "sessions"
         self.query = ""
         self.sort_key = "updated"
         self.sort_descending = True
@@ -689,6 +883,16 @@ class SessionBrowser:
         self.mode = "list"
         self.message = ""
         self.delete_confirm_all = False
+        self.data_directory = self.root
+        self.data_entries: list[DataEntry] = []
+        self.data_query = ""
+        self.data_sort_key = "size"
+        self.data_descending = True
+        self.data_selected = 0
+        self.data_offset = 0
+        self.data_mode = "list"
+        self.data_marked: set[Path] = set()
+        self.data_error = ""
 
     @property
     def visible(self) -> list[Session]:
@@ -702,6 +906,39 @@ class SessionBrowser:
             return None
         self.selected = min(self.selected, len(values) - 1)
         return values[self.selected]
+
+    @property
+    def data_visible(self) -> list[DataEntry]:
+        return filter_and_sort_data(
+            self.data_entries, self.data_query, self.data_sort_key, self.data_descending
+        )
+
+    def data_current(self) -> DataEntry | None:
+        values = self.data_visible
+        if not values:
+            return None
+        self.data_selected = min(self.data_selected, len(values) - 1)
+        return values[self.data_selected]
+
+    def refresh_data(self) -> None:
+        try:
+            self.data_entries = list_data_entries(self.root, self.data_directory)
+            self.data_error = ""
+        except OSError as error:
+            self.data_entries = []
+            self.data_error = f"无法读取 {shorten_home(str(self.data_directory))}: {error}"
+        self.data_selected = min(self.data_selected, max(0, len(self.data_visible) - 1))
+
+    def switch_view(self) -> None:
+        if self.view == "sessions":
+            self.view = "data"
+            self.mode = "list"
+            self.data_mode = "list"
+            self.refresh_data()
+        else:
+            self.view = "sessions"
+            self.data_mode = "list"
+            self.mode = "list"
 
     def select_session(self, session_id: str) -> None:
         """Keep the same session selected after an operation reorders rows."""
@@ -741,14 +978,25 @@ class SessionBrowser:
             self.screen.refresh()
             return
 
-        if self.mode == "detail":
+        if self.view == "data":
+            if self.data_mode == "detail":
+                self.draw_data_detail()
+            elif self.data_mode == "help":
+                self.draw_data_help()
+            else:
+                self.draw_data_list()
+        elif self.mode == "detail":
             self.draw_detail()
         elif self.mode == "help":
             self.draw_help()
         else:
             self.draw_list()
 
-        footer = self.message or "↑↓/jk 浏览  Enter 详情  1-5 排序列  o 顺逆序  d 删除  ? 帮助"
+        footer = self.message or (
+            "Tab 视图  ↑↓/jk 浏览  Enter 打开  i 说明  1-4/<> 排序列  o 顺逆序  d 清理  ? 帮助"
+            if self.view == "data"
+            else "Tab 视图  ↑↓/jk 浏览  Enter 详情  1-5/<> 排序列  o 顺逆序  d 删除  ? 帮助"
+        )
         self.safe_addstr(height - 1, 0, footer, curses.A_REVERSE)
         self.screen.refresh()
 
@@ -760,7 +1008,7 @@ class SessionBrowser:
         total_size = sum(item.size_bytes for item in values)
         direction = "↓" if self.sort_descending else "↑"
         summary = (
-            f" codu  {len(values)}/{len(self.sessions)} sessions  "
+            f" codu [会话] Codex数据 Tab切换  {len(values)}/{len(self.sessions)} sessions  "
             f"{human_size(total_size)}  sort:{self.sort_key}{direction}"
         )
         if self.query:
@@ -818,7 +1066,7 @@ class SessionBrowser:
         import curses
 
         session = self.current()
-        self.safe_addstr(0, 0, " Session details ", curses.A_BOLD | curses.A_REVERSE)
+        self.safe_addstr(0, 0, " [会话] Codex数据  Session details ", curses.A_BOLD | curses.A_REVERSE)
         if session is None:
             self.safe_addstr(2, 2, "没有选中的会话")
             return
@@ -842,8 +1090,9 @@ class SessionBrowser:
     def draw_help(self) -> None:
         import curses
 
-        self.safe_addstr(0, 0, " Help ", curses.A_BOLD | curses.A_REVERSE)
+        self.safe_addstr(0, 0, " [会话] Codex数据  Help ", curses.A_BOLD | curses.A_REVERSE)
         lines = [
+            "Tab            切换会话 / Codex 数据视图",
             "↑/↓ 或 j/k     移动选择",
             "PgUp/PgDn      翻页；Home/End 或 g/G 跳到首尾",
             "Enter/→        查看完整会话信息",
@@ -857,6 +1106,99 @@ class SessionBrowser:
             "r              暂离浏览器并进入当前 Codex 会话",
             "Esc/←          返回列表；在列表中清除搜索",
             "q              退出",
+        ]
+        for row, line in enumerate(lines, start=2):
+            self.safe_addstr(row, 2, line)
+        self.message = "按 Esc、←、q 或 ? 返回"
+
+    def draw_data_list(self) -> None:
+        import curses
+
+        height, width = self.screen.getmaxyx()
+        values = self.data_visible
+        total = sum(item.size_bytes for item in self.data_entries)
+        direction = "↓" if self.data_descending else "↑"
+        self.safe_addstr(
+            0, 0,
+            f" codu 会话 [Codex数据] Tab切换  {human_size(total)}  "
+            f"sort:{self.data_sort_key}{direction}",
+            curses.A_BOLD | curses.A_REVERSE,
+        )
+        location = shorten_home(str(self.data_directory))
+        if self.data_query:
+            location += f"  搜索:{self.data_query}"
+        self.safe_addstr(1, 0, " " + location)
+
+        name_width = max(12, width - 45)
+        labels = ["NAME", "SIZE", "UPDATED", "ACTION"]
+        labels[self.DATA_SORT_KEYS.index(self.data_sort_key)] += direction
+        heading = (
+            "  " + fit_text(f"1 {labels[0]}", name_width) +
+            f" {fit_text(f'2 {labels[1]}', 8)} " +
+            f"{fit_text(f'3 {labels[2]}', 16)} 4 {labels[3]}"
+        )
+        self.safe_addstr(2, 0, heading, curses.A_UNDERLINE)
+        page_size = max(1, height - 4)
+        self.data_offset = min(self.data_offset, self.data_selected)
+        if self.data_selected >= self.data_offset + page_size:
+            self.data_offset = self.data_selected - page_size + 1
+        self.data_offset = min(self.data_offset, max(0, len(values) - page_size))
+        for screen_row, index in enumerate(
+            range(self.data_offset, min(len(values), self.data_offset + page_size)), start=3
+        ):
+            entry = values[index]
+            marker = "*" if entry.path in self.data_marked else " "
+            suffix = "/" if entry.kind == "目录" else "@" if entry.kind == "链接" else ""
+            size = human_size(entry.size_bytes) if entry.complete else "?"
+            line = (
+                f"{marker} " + fit_text(entry.path.name + suffix, name_width) +
+                f" {size:>8} " +
+                f"{entry.updated.astimezone().strftime('%Y-%m-%d %H:%M')} " +
+                entry.action
+            )
+            attribute = curses.A_REVERSE if index == self.data_selected else curses.A_NORMAL
+            self.safe_addstr(screen_row, 0, line, attribute)
+        if not values:
+            self.safe_addstr(4, 2, self.data_error or "目录为空或没有匹配项目")
+
+    def draw_data_detail(self) -> None:
+        import curses
+
+        entry = self.data_current()
+        self.safe_addstr(0, 0, " 会话 [Codex数据]  项目说明 ", curses.A_BOLD | curses.A_REVERSE)
+        if entry is None:
+            return
+        fields = [
+            ("名称", entry.path.name),
+            ("路径", shorten_home(str(entry.path))),
+            ("类型", entry.kind),
+            ("占用估算", human_size(entry.size_bytes) if entry.complete else "扫描不完整"),
+            ("修改时间", entry.updated.astimezone().isoformat(timespec="seconds")),
+            ("内容", entry.description),
+            ("判断依据", entry.basis),
+            ("删除影响", entry.impact),
+            ("处理方式", entry.action),
+        ]
+        for row, (label, value) in enumerate(fields, start=2):
+            self.safe_addstr(row, 2, f"{label}: {value}")
+        self.message = "Esc/←/q 返回  Tab 切换视图  d 清理允许的缓存"
+
+    def draw_data_help(self) -> None:
+        import curses
+
+        self.safe_addstr(0, 0, " 会话 [Codex数据]  Help ", curses.A_BOLD | curses.A_REVERSE)
+        lines = [
+            "Tab            切换视图；保留各视图的排序与位置",
+            "↑/↓ 或 j/k     移动；PgUp/PgDn 翻页；g/G 首尾",
+            "Enter/→        进入目录；文件打开说明；sessions 跳转会话",
+            "i              查看项目用途、依据和删除影响",
+            "←/Backspace    返回上级目录；Esc 先清除搜索",
+            "/              搜索当前目录中的名称",
+            "1–4            按 NAME、SIZE、UPDATED、ACTION 排序",
+            "</>            左右切换排序列；o 切换升降序",
+            "Space          标记当前目录中允许清理的缓存",
+            "d              清理所标记缓存；不适用会话的 A 确认",
+            "q              返回或退出；? 关闭帮助",
         ]
         for row, line in enumerate(lines, start=2):
             self.safe_addstr(row, 2, line)
@@ -993,10 +1335,182 @@ class SessionBrowser:
         if values:
             self.selected = max(0, min(len(values) - 1, self.selected + amount))
 
+    def data_move(self, amount: int) -> None:
+        values = self.data_visible
+        if values:
+            self.data_selected = max(
+                0, min(len(values) - 1, self.data_selected + amount)
+            )
+
+    def data_open(self) -> None:
+        entry = self.data_current()
+        if entry is None:
+            return
+        relative = entry.path.relative_to(self.root)
+        if len(relative.parts) == 1 and relative.name in {
+            "sessions", "archived_sessions"
+        }:
+            self.view = "sessions"
+            self.mode = "list"
+            self.sort_key = "size"
+            self.sort_descending = True
+            self.query = "archived" if relative.name == "archived_sessions" else ""
+            self.selected = 0
+            self.offset = 0
+        elif entry.kind == "目录":
+            self.data_directory = entry.path
+            self.data_query = ""
+            self.data_selected = 0
+            self.data_offset = 0
+            self.data_marked.clear()
+            self.refresh_data()
+        else:
+            self.data_mode = "detail"
+
+    def data_back(self) -> None:
+        if self.data_query:
+            self.data_query = ""
+            self.data_selected = 0
+            self.data_offset = 0
+        elif self.data_directory != self.root:
+            previous = self.data_directory
+            self.data_directory = previous.parent
+            self.data_marked.clear()
+            self.refresh_data()
+            for index, entry in enumerate(self.data_visible):
+                if entry.path == previous:
+                    self.data_selected = index
+                    break
+
+    def delete_data_targets(self) -> None:
+        selected = (
+            [entry for entry in self.data_entries if entry.path in self.data_marked]
+            if self.data_marked else [self.data_current()]
+        )
+        targets = [entry for entry in selected if entry is not None]
+        if not targets:
+            return
+        if any(entry.action != "清理" for entry in targets):
+            self.message = "该项目用途或删除影响未充分确认，codu 不提供删除"
+            return
+        before, before_complete = data_size(self.root, set())
+        deleted = 0
+        cancelled = 0
+        errors: list[str] = []
+        for entry in targets:
+            if not self.confirm_data_cleanup(entry, len(targets)):
+                cancelled += 1
+                continue
+            ok, detail = delete_cache_entry(self.root, entry)
+            if ok:
+                deleted += 1
+            else:
+                errors.append(f"{entry.path.name}: {detail}")
+        self.data_marked.clear()
+        self.refresh_data()
+        after, after_complete = data_size(self.root, set())
+        self.message = f"已清理 {deleted} 项缓存"
+        if cancelled:
+            self.message += f"；取消 {cancelled} 项"
+        if before_complete and after_complete:
+            self.message += f"；本次扫描占用减少 {human_size(max(0, before - after))}"
+        if errors:
+            self.message += f"；失败 {len(errors)} 项：{errors[0]}"
+
+    def confirm_data_cleanup(self, entry: DataEntry, count: int) -> bool:
+        """Confirm one explicit path; session yes-to-all never applies here."""
+        import curses
+
+        height, _ = self.screen.getmaxyx()
+        self.screen.erase()
+        self.safe_addstr(0, 0, " 确认清理 Codex 缓存 ", curses.A_BOLD | curses.A_REVERSE)
+        self.safe_addstr(1, 2, f"路径: {shorten_home(str(entry.path))}")
+        self.safe_addstr(2, 2, f"当前占用: {human_size(entry.size_bytes)}")
+        self.safe_addstr(3, 2, entry.impact)
+        self.safe_addstr(4, 2, f"本次选择 {count} 项；每项单独确认")
+        self.safe_addstr(height - 1, 0, "确认清理这一项？ [y/N] ", curses.A_BOLD | curses.A_REVERSE)
+        self.screen.refresh()
+        return self.screen.getch() in (ord("y"), ord("Y"))
+
+    def handle_data_key(self, key: int) -> bool:
+        import curses
+
+        if self.data_mode in {"detail", "help"}:
+            if key in (27, curses.KEY_LEFT, 8, 127, ord("q"), ord("?")):
+                self.data_mode = "list"
+            elif self.data_mode == "detail" and key == ord("d"):
+                self.delete_data_targets()
+                self.data_mode = "list"
+            return True
+
+        height, _ = self.screen.getmaxyx()
+        page = max(1, height - 4)
+        if key == ord("q"):
+            if self.data_directory == self.root:
+                return False
+            self.data_back()
+        elif key in (curses.KEY_DOWN, ord("j")):
+            self.data_move(1)
+        elif key in (curses.KEY_UP, ord("k")):
+            self.data_move(-1)
+        elif key == curses.KEY_NPAGE:
+            self.data_move(page)
+        elif key == curses.KEY_PPAGE:
+            self.data_move(-page)
+        elif key in (curses.KEY_HOME, ord("g")):
+            self.data_selected = 0
+        elif key in (curses.KEY_END, ord("G")):
+            self.data_selected = max(0, len(self.data_visible) - 1)
+        elif key in (10, 13, curses.KEY_RIGHT):
+            self.data_open()
+        elif key == ord("i"):
+            if self.data_current() is not None:
+                self.data_mode = "detail"
+        elif key == ord("?"):
+            self.data_mode = "help"
+        elif key == ord("/"):
+            self.data_query = self.prompt("搜索当前目录: ").strip()
+            self.data_selected = 0
+            self.data_offset = 0
+        elif key in (27, curses.KEY_LEFT, curses.KEY_BACKSPACE, 8, 127):
+            self.data_back()
+        elif key == ord(" "):
+            entry = self.data_current()
+            if entry is not None and entry.action == "清理":
+                if entry.path in self.data_marked:
+                    self.data_marked.remove(entry.path)
+                else:
+                    self.data_marked.add(entry.path)
+                self.data_move(1)
+            else:
+                self.message = "该项目不可标记清理"
+        elif ord("1") <= key <= ord("4"):
+            self.data_sort_key = self.DATA_SORT_KEYS[key - ord("1")]
+            self.data_selected = 0
+            self.data_offset = 0
+        elif key in (ord("<"), ord(","), ord(">"), ord(".")):
+            step = -1 if key in (ord("<"), ord(",")) else 1
+            index = (self.DATA_SORT_KEYS.index(self.data_sort_key) + step) % 4
+            self.data_sort_key = self.DATA_SORT_KEYS[index]
+            self.data_selected = 0
+            self.data_offset = 0
+        elif key == ord("o"):
+            self.data_descending = not self.data_descending
+            self.data_selected = 0
+            self.data_offset = 0
+        elif key == ord("d"):
+            self.delete_data_targets()
+        return True
+
     def handle_key(self, key: int) -> bool:
         import curses
 
         self.message = ""
+        if key == 9:
+            self.switch_view()
+            return True
+        if self.view == "data":
+            return self.handle_data_key(key)
         if self.mode in {"detail", "help"}:
             if key in (27, curses.KEY_LEFT, ord("q"), ord("?")):
                 self.mode = "list"
@@ -1082,8 +1596,8 @@ class SessionBrowser:
                 break
 
 
-def run_tui(sessions: Sequence[Session]) -> None:
-    """Open the interactive session browser."""
+def run_tui(sessions: Sequence[Session], root: Path | None = None) -> None:
+    """Open the interactive session and CODEX_HOME browser."""
     try:
         import curses
     except ImportError as error:
@@ -1091,7 +1605,7 @@ def run_tui(sessions: Sequence[Session]) -> None:
         raise RuntimeError(
             f"当前 Python 环境不支持 curses{detail}，或使用 --plain"
         ) from error
-    curses.wrapper(lambda screen: SessionBrowser(screen, sessions).run())
+    curses.wrapper(lambda screen: SessionBrowser(screen, sessions, root).run())
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1149,7 +1663,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print_tsv(sessions)
     else:
         try:
-            run_tui(sessions)
+            run_tui(sessions, root)
         except RuntimeError as error:
             print(f"codu: {error}", file=sys.stderr)
             return 1

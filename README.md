@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-一个面向本地 Codex 会话的终端浏览器。它借鉴 `ncdu` 和 `top` 的交互方式，让你快速查看会话的时间、ID、工作目录、名称或内容简介、状态和会话文件大小，并在确认后执行归档、恢复或删除。
+一个面向本地 Codex 会话与数据目录的终端浏览器。它借鉴 `ncdu` 和 `top` 的交互方式，让你查看、排序和清理会话，并检查 `$CODEX_HOME` 中其他文件的占用、用途和删除影响。
 
 > [!WARNING]
 > 本项目目前处于实验阶段。删除是永久操作；使用前请先阅读[安全模型](#安全模型)与[已知限制](#已知限制)。
@@ -12,6 +12,9 @@
 ## 功能
 
 - `ncdu` 风格的全屏终端界面，支持方向键与 `j` / `k` 导航
+- `Tab` 切换会话与 Codex 数据视图；分别保留排序、搜索和浏览位置
+- 逐层浏览 Codex 数据目录，按名称、占用估算、修改时间或处理方式排序
+- 对已识别的缓存子目录提供逐项确认清理；配置、凭据、数据库和未知项目只读
 - 显示 active/archived 状态、运行状态、更新时间、会话 ID、工作目录、名称/简介和 JSONL 文件大小
 - 按状态、大小、更新时间、名称或工作目录正序/倒序排列
 - 按名称、ID、目录或状态搜索
@@ -53,15 +56,15 @@ Formula 源文件位于 [`packaging/homebrew/codu.rb`](packaging/homebrew/codu.r
 推荐用 `uv` 安装固定版本的通用 wheel：
 
 ```console
-uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.2.0/codu-0.2.0-py3-none-any.whl
+uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.0/codu-0.3.0-py3-none-any.whl
 codu --version
 ```
 
 也支持普通 `pip` 或 `pipx`：
 
 ```console
-python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.2.0/codu-0.2.0-py3-none-any.whl
-pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.2.0/codu-0.2.0-py3-none-any.whl
+python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.0/codu-0.3.0-py3-none-any.whl
+pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.0/codu-0.3.0-py3-none-any.whl
 ```
 
 Windows 推荐使用 Windows Terminal 和 PowerShell；在 PowerShell 中可将 `python` 替换为 `py`。
@@ -127,6 +130,7 @@ usage: codu [-h] [--json | --plain] [--verbose] [--version] [directory]
 | 按键 | 操作 |
 | --- | --- |
 | `↑` / `↓`, `j` / `k` | 上下移动 |
+| `Tab` | 切换会话与 Codex 数据视图 |
 | `PgUp` / `PgDn` | 翻页 |
 | `Home` / `End`, `g` / `G` | 跳到首条/末条 |
 | `Enter`, `→` | 查看会话详情 |
@@ -149,6 +153,16 @@ usage: codu [-h] [--json | --plain] [--verbose] [--version] [directory]
 | `o` | 切换正序 `↑` / 倒序 `↓` |
 
 当前排序列与方向会同时显示在顶部状态栏和表头。
+
+两个视图都使用数字键直接选择排序列、`<` / `>`（或 `,` / `.`）左右切换排序列、`o` 切换升降序。数据视图的 `1–4` 对应 NAME、SIZE、UPDATED、ACTION，首次进入默认按 SIZE 倒序排列。方向键只用于浏览和进出目录。
+
+### Codex 数据视图
+
+`Tab` 进入 `$CODEX_HOME`（默认 `~/.codex`）。`Enter` / `→` 进入目录，文件则打开用途说明；`i` 可查看任意当前项目的完整说明、判断依据和删除影响。`←` / `Backspace` 返回上级目录，`/` 搜索当前目录名称。`Space` 只标记当前目录中允许清理的缓存；进入其他目录时清除标记。`d` 清理当前项或已标记项，每项都显示路径并分别要求 `y` 确认；会话视图的 `A` 不适用于数据清理。
+
+在数据视图选中顶层的 `sessions/` 或 `archived_sessions/` 并按 `Enter`，会跳至按大小排序的会话视图。会话始终通过 Codex 命令删除，不直接删除会话文件。当前允许清理的范围仅限 `cache/` 内已识别的五个缓存子目录；未识别内容和其他文件可以浏览，但不能从 codu 删除。
+
+SIZE 根据文件系统分配块估算；硬链接在同一目录扫描中只计算一次，符号链接不跟随。CoW 克隆、压缩和并发写入可能使它与删除后释放的空间不同。清理完成后会重新扫描并显示本次扫描的占用变化。
 
 ### 会话操作
 
@@ -207,6 +221,7 @@ codu --plain | column -t -s $'\t'
 - 浏览、筛选与导出不会直接修改会话日志；app-server 可能维护或修复自己的元数据索引。
 - 归档与恢复通过 Codex CLI 执行，是可逆操作。
 - 删除通过 `codex delete --force <UUID>` 执行，是永久操作。按 Codex 的线程删除语义，它还可能删除该线程的派生子线程。
+- 数据视图仅允许清理已识别的缓存子目录；删除前重新核对文件身份与路径，不跟随符号链接。缓存可能由运行中的 Codex 再次生成。
 - `STATUS=active...` 只表示**当前连接的 app-server**认为会话正在运行；`notLoaded` 或 `unknown` 不能证明其他 Codex 进程没有使用该会话。
 - `A` 只在当前进程内关闭后续删除确认。启用后应特别留意当前选择与已标记会话。
 - 程序通过参数数组调用 `codex`，不经过 shell 拼接会话 ID 或路径。
@@ -216,6 +231,7 @@ codu --plain | column -t -s $'\t'
 ## 已知限制
 
 - SIZE 仅统计当前线程对应的 JSONL 文件，不包含附件、生成图片、缓存，也不包含删除时可能一并移除的派生子线程；它不是精确的“可释放磁盘空间”。
+- Codex 数据视图的说明依据官方文档、本地路径或文件类型；无法确认用途时会明确标示，并禁用删除。Codex 的 SQLite 文件及其 WAL/SHM 文件不会逐个清理。
 - 新启动的本地 app-server 只能报告自身的运行状态，可能看不到其他 Codex 进程的活动。
 - 文件扫描回退依赖 Codex 当前的本地 JSONL 格式；该内部格式变化时可能需要适配。
 - Windows 全屏模式面向 Windows Terminal 与 PowerShell；旧版控制台宿主不在支持范围内。
