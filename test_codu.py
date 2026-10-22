@@ -2,10 +2,12 @@ import contextlib
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -88,6 +90,197 @@ for line in sys.stdin:
 
 
 class CoduTests(unittest.TestCase):
+    def test_data_view_classifies_entries_and_counts_allocated_space(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "sessions").mkdir()
+            (root / "sessions" / "large.jsonl").write_bytes(b"x" * 100_000)
+            (root / "cache" / "remote_plugin_catalog").mkdir(parents=True)
+            (root / "cache" / "remote_plugin_catalog" / "index").write_bytes(b"x")
+            (root / "auth.json").write_text("credential", encoding="utf-8")
+            (root / "unknown").write_text("unknown", encoding="utf-8")
+            rows = {row.path.name: row for row in codu.list_data_entries(root, root)}
+
+            self.assertEqual(rows["sessions"].action, "会话")
+            self.assertEqual(rows["auth.json"].action, "只读")
+            self.assertEqual(rows["unknown"].basis, "未确认")
+            self.assertGreaterEqual(rows["sessions"].size_bytes, 4096)
+            cache_rows = codu.list_data_entries(root, root / "cache")
+            self.assertEqual(cache_rows[0].action, "核查")
+            self.assertEqual(
+                codu.filter_and_sort_data(list(rows.values()), "", "size", True)[0].path.name,
+                "sessions",
+            )
+
+    def test_cache_scan_does_not_follow_symlinks_or_offer_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "codex"
+            outside = Path(temp) / "outside"
+            outside.mkdir()
+            (outside / "keep").write_bytes(b"x" * 1_000_000)
+            cache = root / "cache" / "remote_plugin_catalog"
+            cache.mkdir(parents=True)
+            (cache / "file").write_text("cache", encoding="utf-8")
+            try:
+                (cache / "link").symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                pass
+            entry = codu.list_data_entries(root, root / "cache")[0]
+            self.assertEqual(entry.action, "核查")
+            self.assertLess(entry.size_bytes, 1_000_000)
+            self.assertTrue(cache.exists())
+            self.assertTrue((outside / "keep").exists())
+
+    def test_keyboard_switches_views_and_uses_same_sort_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "cache").mkdir()
+            screen = Mock()
+            screen.getmaxyx.return_value = (24, 100)
+            browser = codu.SessionBrowser(screen, [], root)
+            browser.handle_key(9)
+            self.assertEqual(browser.view, "data")
+            self.assertEqual(browser.data_sort_key, "size")
+            browser.handle_key(ord("1"))
+            self.assertEqual(browser.data_sort_key, "name")
+            browser.handle_key(ord(">"))
+            self.assertEqual(browser.data_sort_key, "size")
+            browser.handle_key(ord("o"))
+            self.assertFalse(browser.data_descending)
+            browser.handle_key(9)
+            self.assertEqual(browser.view, "sessions")
+            browser.handle_key(ord("2"))
+            self.assertEqual(browser.sort_key, "size")
+            browser.handle_key(ord("<"))
+            self.assertEqual(browser.sort_key, "state")
+            browser.handle_key(9)
+            self.assertEqual(browser.data_sort_key, "size")
+            self.assertFalse(browser.data_descending)
+
+    def test_data_navigation_links_sessions_and_keeps_read_only_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "sessions").mkdir()
+            (root / "cache" / "remote_plugin_catalog").mkdir(parents=True)
+            (root / "cache" / "other").write_text("unknown", encoding="utf-8")
+            screen = Mock()
+            screen.getmaxyx.return_value = (24, 100)
+            browser = codu.SessionBrowser(screen, [], root)
+            browser.handle_key(9)
+            browser.data_sort_key = "name"
+            browser.data_selected = next(
+                index for index, entry in enumerate(browser.data_visible)
+                if entry.path.name == "cache"
+            )
+            browser.data_open()
+            self.assertEqual(browser.data_directory, root / "cache")
+            self.assertEqual(
+                next(entry for entry in browser.data_entries if entry.path.name == "other").action,
+                "只读",
+            )
+            browser.data_back()
+            self.assertEqual(browser.data_directory, root)
+            browser.data_selected = next(
+                index for index, entry in enumerate(browser.data_visible)
+                if entry.path.name == "sessions"
+            )
+            browser.data_open()
+            self.assertEqual(browser.view, "sessions")
+            self.assertEqual(browser.sort_key, "size")
+            self.assertTrue(browser.sort_descending)
+
+    def test_vim_keys_navigate_data_directories_and_details(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "cache").mkdir()
+            (root / "cache" / "item.txt").write_text("keep", encoding="utf-8")
+            screen = Mock()
+            screen.getmaxyx.return_value = (24, 100)
+            browser = codu.SessionBrowser(screen, [], root)
+            browser.handle_key(9)
+            browser.data_sort_key = "name"
+            browser.handle_key(ord("L"))
+            self.assertEqual(browser.data_directory, root / "cache")
+
+            browser.data_query = "item"
+            browser.handle_key(ord("H"))
+            self.assertEqual(browser.data_directory, root)
+            self.assertEqual(browser.data_query, "")
+            browser.handle_key(ord("h"))
+            self.assertEqual(browser.data_directory, root)
+
+            browser.handle_key(ord("l"))
+            browser.handle_key(ord("l"))
+            self.assertEqual(browser.data_mode, "detail")
+            browser.handle_key(ord("h"))
+            self.assertEqual(browser.data_mode, "list")
+
+            browser.data_query = "item"
+            browser.handle_key(27)
+            self.assertEqual(browser.data_query, "")
+            self.assertEqual(browser.data_directory, root / "cache")
+            browser.handle_key(ord("j"))
+            browser.handle_key(ord("K"))
+            self.assertEqual(browser.data_selected, 0)
+
+    def test_vim_keys_open_and_leave_session_details(self) -> None:
+        session = codu.Session(
+            updated=codu.datetime.fromisoformat("2026-09-24T08:00:00+00:00"),
+            state="active", status="notLoaded", session_id="first",
+            size_bytes=10, title="First", cwd="/repo", path=None,
+        )
+        screen = Mock()
+        screen.getmaxyx.return_value = (24, 100)
+        browser = codu.SessionBrowser(screen, [session])
+        browser.handle_key(ord("l"))
+        self.assertEqual(browser.mode, "detail")
+        browser.handle_key(ord("H"))
+        self.assertEqual(browser.mode, "list")
+        browser.handle_key(ord("h"))
+        self.assertEqual(browser.mode, "list")
+
+    def test_data_view_does_not_delete_unknown_or_cache_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "unknown").write_text("preserve", encoding="utf-8")
+            screen = Mock()
+            screen.getmaxyx.return_value = (24, 100)
+            browser = codu.SessionBrowser(screen, [], root)
+            browser.handle_key(9)
+            browser.data_sort_key = "name"
+            browser.data_selected = 0
+            browser.handle_key(ord("d"))
+            self.assertTrue((root / "unknown").exists())
+            self.assertIn("只读", browser.message)
+
+            cache = root / "cache" / "remote_plugin_catalog"
+            cache.mkdir(parents=True)
+            browser.data_directory = root / "cache"
+            browser.refresh_data()
+            browser.handle_key(ord("d"))
+            self.assertTrue(cache.exists())
+            screen.getch.assert_not_called()
+
+    def test_sqlite_free_pages_are_explained_without_database_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "thread_history_1.sqlite"
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("CREATE TABLE thread_items (item_json TEXT)")
+                connection.executemany(
+                    "INSERT INTO thread_items VALUES (?)", [("x" * 5000,)] * 40
+                )
+                connection.execute("DELETE FROM thread_items")
+                connection.commit()
+            free = codu.sqlite_free_bytes(path)
+            self.assertIsNotNone(free)
+            assert free is not None
+            self.assertGreater(free, 0)
+            rows = codu.list_data_entries(root, root)
+            self.assertIn("分页历史库", rows[0].description)
+            self.assertEqual(rows[0].action, "只读")
+            self.assertTrue(any("数据库空闲页" in line for line in codu.data_advice(rows)))
+
     def test_discovers_filters_and_prefers_latest_renamed_title(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

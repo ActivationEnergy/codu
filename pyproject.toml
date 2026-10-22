@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "codu"
 dynamic = ["version"]
-description = "Browse and manage local Codex sessions in an ncdu-style TUI"
+description = "Browse local Codex sessions and data in an ncdu-style TUI"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
   { name = "ActivationEnergy", email = "244162811+ActivationEnergy@users.noreply.github.com" },
 ]
-keywords = ["codex", "sessions", "terminal", "tui"]
+keywords = ["codex", "sessions", "storage", "terminal", "tui"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console :: Curses",
