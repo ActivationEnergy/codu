@@ -2,10 +2,12 @@ import contextlib
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -104,18 +106,18 @@ class CoduTests(unittest.TestCase):
             self.assertEqual(rows["unknown"].basis, "未确认")
             self.assertGreaterEqual(rows["sessions"].size_bytes, 4096)
             cache_rows = codu.list_data_entries(root, root / "cache")
-            self.assertEqual(cache_rows[0].action, "清理")
+            self.assertEqual(cache_rows[0].action, "核查")
             self.assertEqual(
                 codu.filter_and_sort_data(list(rows.values()), "", "size", True)[0].path.name,
                 "sessions",
             )
 
-    def test_cache_cleanup_rechecks_identity_and_does_not_follow_symlinks(self) -> None:
+    def test_cache_scan_does_not_follow_symlinks_or_offer_deletion(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "codex"
             outside = Path(temp) / "outside"
             outside.mkdir()
-            (outside / "keep").write_text("keep", encoding="utf-8")
+            (outside / "keep").write_bytes(b"x" * 1_000_000)
             cache = root / "cache" / "remote_plugin_catalog"
             cache.mkdir(parents=True)
             (cache / "file").write_text("cache", encoding="utf-8")
@@ -123,16 +125,10 @@ class CoduTests(unittest.TestCase):
                 (cache / "link").symlink_to(outside, target_is_directory=True)
             except (OSError, NotImplementedError):
                 pass
-            original = codu.list_data_entries(root, root / "cache")[0]
-            cache.rename(cache.with_name("old_catalog"))
-            cache.mkdir()
-            self.assertFalse(codu.delete_cache_entry(root, original)[0])
+            entry = codu.list_data_entries(root, root / "cache")[0]
+            self.assertEqual(entry.action, "核查")
+            self.assertLess(entry.size_bytes, 1_000_000)
             self.assertTrue(cache.exists())
-
-            current = codu.list_data_entries(root, root / "cache")
-            cleanable = next(row for row in current if row.path == cache)
-            self.assertTrue(codu.delete_cache_entry(root, cleanable)[0])
-            self.assertFalse(cache.exists())
             self.assertTrue((outside / "keep").exists())
 
     def test_keyboard_switches_views_and_uses_same_sort_controls(self) -> None:
@@ -193,7 +189,57 @@ class CoduTests(unittest.TestCase):
             self.assertEqual(browser.sort_key, "size")
             self.assertTrue(browser.sort_descending)
 
-    def test_data_cleanup_requires_own_confirmation_and_blocks_unknown_items(self) -> None:
+    def test_vim_keys_navigate_data_directories_and_details(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "cache").mkdir()
+            (root / "cache" / "item.txt").write_text("keep", encoding="utf-8")
+            screen = Mock()
+            screen.getmaxyx.return_value = (24, 100)
+            browser = codu.SessionBrowser(screen, [], root)
+            browser.handle_key(9)
+            browser.data_sort_key = "name"
+            browser.handle_key(ord("L"))
+            self.assertEqual(browser.data_directory, root / "cache")
+
+            browser.data_query = "item"
+            browser.handle_key(ord("H"))
+            self.assertEqual(browser.data_directory, root)
+            self.assertEqual(browser.data_query, "")
+            browser.handle_key(ord("h"))
+            self.assertEqual(browser.data_directory, root)
+
+            browser.handle_key(ord("l"))
+            browser.handle_key(ord("l"))
+            self.assertEqual(browser.data_mode, "detail")
+            browser.handle_key(ord("h"))
+            self.assertEqual(browser.data_mode, "list")
+
+            browser.data_query = "item"
+            browser.handle_key(27)
+            self.assertEqual(browser.data_query, "")
+            self.assertEqual(browser.data_directory, root / "cache")
+            browser.handle_key(ord("j"))
+            browser.handle_key(ord("K"))
+            self.assertEqual(browser.data_selected, 0)
+
+    def test_vim_keys_open_and_leave_session_details(self) -> None:
+        session = codu.Session(
+            updated=codu.datetime.fromisoformat("2026-09-24T08:00:00+00:00"),
+            state="active", status="notLoaded", session_id="first",
+            size_bytes=10, title="First", cwd="/repo", path=None,
+        )
+        screen = Mock()
+        screen.getmaxyx.return_value = (24, 100)
+        browser = codu.SessionBrowser(screen, [session])
+        browser.handle_key(ord("l"))
+        self.assertEqual(browser.mode, "detail")
+        browser.handle_key(ord("H"))
+        self.assertEqual(browser.mode, "list")
+        browser.handle_key(ord("h"))
+        self.assertEqual(browser.mode, "list")
+
+    def test_data_view_does_not_delete_unknown_or_cache_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "unknown").write_text("preserve", encoding="utf-8")
@@ -203,21 +249,37 @@ class CoduTests(unittest.TestCase):
             browser.handle_key(9)
             browser.data_sort_key = "name"
             browser.data_selected = 0
-            browser.delete_confirm_all = True
-            browser.delete_data_targets()
+            browser.handle_key(ord("d"))
             self.assertTrue((root / "unknown").exists())
-            self.assertIn("不提供删除", browser.message)
+            self.assertIn("只读", browser.message)
 
             cache = root / "cache" / "remote_plugin_catalog"
             cache.mkdir(parents=True)
             browser.data_directory = root / "cache"
             browser.refresh_data()
-            entry = browser.data_current()
-            assert entry is not None
-            screen.getch.return_value = ord("A")
-            self.assertFalse(browser.confirm_data_cleanup(entry, 1))
-            screen.getch.return_value = ord("y")
-            self.assertTrue(browser.confirm_data_cleanup(entry, 1))
+            browser.handle_key(ord("d"))
+            self.assertTrue(cache.exists())
+            screen.getch.assert_not_called()
+
+    def test_sqlite_free_pages_are_explained_without_database_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "thread_history_1.sqlite"
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("CREATE TABLE thread_items (item_json TEXT)")
+                connection.executemany(
+                    "INSERT INTO thread_items VALUES (?)", [("x" * 5000,)] * 40
+                )
+                connection.execute("DELETE FROM thread_items")
+                connection.commit()
+            free = codu.sqlite_free_bytes(path)
+            self.assertIsNotNone(free)
+            assert free is not None
+            self.assertGreater(free, 0)
+            rows = codu.list_data_entries(root, root)
+            self.assertIn("分页历史库", rows[0].description)
+            self.assertEqual(rows[0].action, "只读")
+            self.assertTrue(any("数据库空闲页" in line for line in codu.data_advice(rows)))
 
     def test_discovers_filters_and_prefers_latest_renamed_title(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

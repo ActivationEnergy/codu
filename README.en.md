@@ -14,7 +14,7 @@ This is an unofficial community project and is not affiliated with OpenAI.
 - Full-screen, `ncdu`-style terminal UI with arrow-key and `j` / `k` navigation
 - `Tab` switches between Sessions and Codex Data, preserving each view's position, search, and sort
 - Browse the Codex data directory and sort by name, estimated space, modification time, or action
-- Confirm cleanup of recognized cache subdirectories; configuration, credentials, databases, and unknown items are read-only
+- Get space-usage guidance for sessions, databases, and plugins; configuration, credentials, databases, and unverified caches are read-only
 - Active/archived state, runtime status, update time, session ID, working directory, title/preview, and JSONL file size
 - Ascending or descending sort by state, size, update time, title, or working directory
 - Search by title, ID, directory, or status
@@ -130,13 +130,14 @@ usage: codu [-h] [--json | --plain] [--verbose] [--version] [directory]
 | Key | Action |
 | --- | --- |
 | `↑` / `↓`, `j` / `k` | Move up/down |
+| `h` / `←` | Go directly to the parent directory in Codex Data; return from details |
+| `l` / `→` / `Enter` | Enter a directory or open the current item |
 | `Tab` | Switch between Sessions and Codex Data |
 | `PgUp` / `PgDn` | Move one page |
 | `Home` / `End`, `g` / `G` | Jump to first/last row |
-| `Enter`, `→` | Open session details |
-| `Esc`, `←` | Return to the list; clear search from the list |
-| `/` | Search title, ID, directory, or status |
-| `Space` | Mark or unmark the current session |
+| `Esc` | Return from details; clear search first in a list |
+| `/` | Search the current view |
+| `Space` | Mark or unmark a session in the Sessions view |
 | `?` | Open help |
 | `q` | Go back or quit |
 
@@ -152,17 +153,17 @@ usage: codu [-h] [--json | --plain] [--verbose] [--version] [directory]
 | `<` / `>` | Move to the previous/next sort column |
 | `o` | Toggle ascending `↑` / descending `↓` |
 
-The active sort column and direction appear in both the status bar and column header.
+The active sort column and direction appear in a separate status row and column header. The title row contains only the two spaced view tabs.
 
 Both views use number keys to select a sort column, `<` / `>` (or `,` / `.`) to cycle columns, and `o` to reverse direction. In Codex Data, `1–4` select NAME, SIZE, UPDATED, and ACTION. The initial data sort is SIZE descending. Arrow keys navigate entries and directories.
 
 ### Codex Data
 
-Press `Tab` to browse `$CODEX_HOME` (normally `~/.codex`). `Enter` / `→` opens a directory or a file's explanation; `i` shows the selected item's purpose, evidence, and deletion impact. `←` / `Backspace` goes to the parent directory. `/` searches names in the current directory. `Space` marks only cleanable caches in that directory, and marks clear when entering another directory. `d` cleans the current or marked items, showing each path and requesting `y` separately. The Sessions view's `A` confirmation does not apply to data cleanup.
+Press `Tab` to browse `$CODEX_HOME` (normally `~/.codex`). `l` / `Enter` / `→` opens a directory or a file's explanation; `i` shows the selected item's purpose, evidence, and deletion impact. `h` / `←` / `Backspace` goes directly to the parent directory, even when a search filter is active; `Esc` clears the filter first. At the data root, `h` does nothing. `/` searches names in the current directory. Uppercase `H/J/K/L` work too. The root view shows cleanup guidance; press `R` for the full advice.
 
-Opening top-level `sessions/` or `archived_sessions/` switches to the Sessions view sorted by size. Sessions are always deleted through Codex, never by removing transcript files directly. Data cleanup is limited to five recognized subdirectories of `cache/`; other items remain browsable but read-only.
+Opening top-level `sessions/` or `archived_sessions/` with `Enter` or `d` switches to the Sessions view sorted by size. Select a specific session and press `d` to delete it through Codex. codu never deletes data files directly, including caches and SQLite/WAL/SHM files.
 
-SIZE estimates allocated blocks without following symlinks and counts hard links once within a directory scan. CoW clones, compression, and concurrent writes mean it is not a precise prediction of reclaimed space. After cleanup, codu rescans and reports the change in measured usage.
+Data SIZE estimates allocated blocks without following symlinks and counts hard links once within a directory scan. CoW clones, compression, and concurrent writes mean it is not a precise prediction of reclaimed space. SQLite free pages are estimated from a read-only main-file snapshot, which may exclude pending WAL updates. The data view rescans when reopened.
 
 ### Session actions
 
@@ -221,7 +222,7 @@ codu --plain | column -t -s $'\t'
 - Browsing, filtering, and exporting do not directly modify transcript logs. app-server may maintain or repair its own metadata indexes.
 - Archive and restore operations are reversible and run through the Codex CLI.
 - Delete runs `codex delete --force <UUID>` and is permanent. Under Codex thread deletion semantics, it may also delete descendant threads.
-- Codex Data only cleans recognized cache subdirectories. It rechecks each path and file identity before deletion and does not follow symlinks. A running Codex may recreate caches.
+- Codex Data does not delete files under `CODEX_HOME` directly. Session deletion always uses the Codex CLI; unverified cache paths remain read-only.
 - `STATUS=active...` only means the **connected app-server** considers the session active. `notLoaded` or `unknown` does not prove another Codex process is not using it.
 - `A` disables later confirmations only for the current process. Once enabled, pay close attention to the cursor and marked sessions.
 - codu passes arguments to `codex` as an argument array; it does not interpolate session IDs or paths into a shell command.
