@@ -7,7 +7,7 @@ class Codu < Formula
   homepage "https://github.com/ActivationEnergy/codu"
   url "https://raw.githubusercontent.com/ActivationEnergy/codu/v0.3.0/codu.py"
   version "0.3.0"
-  sha256 "7407f63067e04776c8e9ffb53e8a3f4ed8d11d4fbe6a5421e92a3b152adc14f0"
+  sha256 "d35a0c8945dd0e6f4227ff68641721f23a7583985eb307926b1366dd0ec353b5"
   license "MIT"
 
   depends_on "python@3.14"
