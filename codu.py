@@ -46,7 +46,7 @@ INJECTED_USER_PREFIXES = (
 )
 
 DEFAULT_OPERATION_TIMEOUT = 30.0
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 
 @dataclass(frozen=True)
@@ -817,6 +817,43 @@ def fit_text(value: str, width: int) -> str:
     return "".join(result) + "…" + " " * max(0, width - used - 1)
 
 
+def fit_text_end(value: str, width: int) -> str:
+    """Fit a path by retaining its end, where project names usually differ."""
+    if width <= 0:
+        return ""
+    if display_width(value) <= width:
+        return value + " " * (width - display_width(value))
+    if width == 1:
+        return "…"
+
+    clusters: list[str] = []
+    for char in value:
+        if unicodedata.combining(char) and clusters:
+            clusters[-1] += char
+        else:
+            clusters.append(char)
+    suffix: list[str] = []
+    used = 0
+    for cluster in reversed(clusters):
+        cluster_width = display_width(cluster)
+        if used + cluster_width > width - 1:
+            break
+        suffix.append(cluster)
+        used += cluster_width
+    return "…" + "".join(reversed(suffix)) + " " * (width - used - 1)
+
+
+def session_column_widths(terminal_width: int) -> tuple[int, int]:
+    """Give CWD the remaining space after a compact session name column."""
+    fixed_width = 37
+    usable = max(0, terminal_width - 1 - fixed_width)
+    title_width = min(30, max(18, terminal_width // 4))
+    cwd_width = usable - title_width - 2
+    if terminal_width >= 72 and cwd_width >= 14:
+        return title_width, cwd_width
+    return max(0, usable), 0
+
+
 def filter_and_sort_sessions(
     sessions: Sequence[Session],
     query: str,
@@ -1065,9 +1102,7 @@ class SessionBrowser:
             summary += f"  搜索:{self.query}"
         self.draw_context(summary, f"{human_size(total_size)}  排序 {self.sort_key}{direction}")
 
-        cwd_width = max(0, min(38, width // 4)) if width >= 110 else 0
-        fixed_width = 2 + 9 + 8 + 17 + 2 + cwd_width
-        title_width = max(12, width - fixed_width)
+        title_width, cwd_width = session_column_widths(width)
         headings = {
             "state": "STATE",
             "size": "SIZE",
@@ -1105,7 +1140,7 @@ class SessionBrowser:
                 + fit_text(session.title, title_width)
             )
             if cwd_width:
-                line += "  " + fit_text(shorten_home(session.cwd), cwd_width)
+                line += "  " + fit_text_end(shorten_home(session.cwd), cwd_width)
             attribute = curses.A_REVERSE if index == self.selected else curses.A_NORMAL
             self.safe_addstr(screen_row, 0, line, attribute)
 

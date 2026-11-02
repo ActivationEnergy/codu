@@ -16,6 +16,7 @@
 - 逐层浏览 Codex 数据目录，按名称、占用估算、修改时间或处理方式排序
 - 根据当前占用提供会话、数据库和插件整理建议；配置、凭据、数据库与未核实的缓存只读
 - 显示 active/archived 状态、运行状态、更新时间、会话 ID、工作目录、名称/简介和 JSONL 文件大小
+- 会话列表为 CWD 留出更多宽度；长路径保留末尾以便区分项目
 - 按状态、大小、更新时间、名称或工作目录正序/倒序排列
 - 按名称、ID、目录或状态搜索
 - 多选并批量归档、恢复或永久删除
@@ -56,15 +57,15 @@ Formula 源文件位于 [`packaging/homebrew/codu.rb`](packaging/homebrew/codu.r
 推荐用 `uv` 安装固定版本的通用 wheel：
 
 ```console
-uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.0/codu-0.3.0-py3-none-any.whl
+uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.1/codu-0.3.1-py3-none-any.whl
 codu --version
 ```
 
 也支持普通 `pip` 或 `pipx`：
 
 ```console
-python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.0/codu-0.3.0-py3-none-any.whl
-pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.0/codu-0.3.0-py3-none-any.whl
+python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.1/codu-0.3.1-py3-none-any.whl
+pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.1/codu-0.3.1-py3-none-any.whl
 ```
 
 Windows 推荐使用 Windows Terminal 和 PowerShell；在 PowerShell 中可将 `python` 替换为 `py`。
