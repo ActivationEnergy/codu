@@ -426,6 +426,29 @@ class CoduTests(unittest.TestCase):
         self.assertEqual(codu.display_width("中文a"), 5)
         self.assertEqual(codu.display_width(codu.fit_text("中文a", 4)), 4)
 
+    def test_session_columns_prioritize_cwd_suffix(self) -> None:
+        self.assertEqual(codu.session_column_widths(60)[1], 0)
+        self.assertEqual(codu.session_column_widths(80), (20, 20))
+        self.assertEqual(codu.session_column_widths(120), (30, 50))
+        path = "/Users/example/projects/ActivationEnergy/中文仓库"
+        fitted = codu.fit_text_end(path, 20)
+        self.assertEqual(codu.display_width(fitted), 20)
+        self.assertTrue(fitted.startswith("…"))
+        self.assertTrue(fitted.endswith("中文仓库"))
+
+        session = codu.Session(
+            updated=codu.datetime.fromisoformat("2026-09-24T08:00:00+00:00"),
+            state="active", status="notLoaded", session_id="one",
+            size_bytes=10, title="A session with a lengthy name", cwd=path, path=None,
+        )
+        screen = Mock()
+        screen.getmaxyx.return_value = (24, 80)
+        codu.SessionBrowser(screen, [session]).draw_list()
+        rendered = "\n".join(
+            call.args[2] for call in screen.addstr.call_args_list if call.args[0] == 3
+        )
+        self.assertIn("中文仓库", rendered)
+
     def test_delete_confirmation_has_yes_no_and_yes_to_all(self) -> None:
         self.assertEqual(codu.confirmation_choice(ord("y")), "yes")
         self.assertEqual(codu.confirmation_choice(ord("A")), "all")

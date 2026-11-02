@@ -16,6 +16,7 @@ This is an unofficial community project and is not affiliated with OpenAI.
 - Browse the Codex data directory and sort by name, estimated space, modification time, or action
 - Get space-usage guidance for sessions, databases, and plugins; configuration, credentials, databases, and unverified caches are read-only
 - Active/archived state, runtime status, update time, session ID, working directory, title/preview, and JSONL file size
+- More room for CWD in the session list; long paths keep their distinguishing suffix
 - Ascending or descending sort by state, size, update time, title, or working directory
 - Search by title, ID, directory, or status
 - Multi-select archive, restore, and permanent delete operations
@@ -56,15 +57,15 @@ The formula source is [`packaging/homebrew/codu.rb`](packaging/homebrew/codu.rb)
 The recommended path is to install the versioned universal wheel with `uv`:
 
 ```console
-uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.0/codu-0.3.0-py3-none-any.whl
+uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.1/codu-0.3.1-py3-none-any.whl
 codu --version
 ```
 
 Regular `pip` and `pipx` are also supported:
 
 ```console
-python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.0/codu-0.3.0-py3-none-any.whl
-pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.0/codu-0.3.0-py3-none-any.whl
+python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.1/codu-0.3.1-py3-none-any.whl
+pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.1/codu-0.3.1-py3-none-any.whl
 ```
 
 On Windows, use Windows Terminal with PowerShell; replace `python` with `py` in the command above when needed.
