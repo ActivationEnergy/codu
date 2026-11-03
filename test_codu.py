@@ -376,6 +376,74 @@ class CoduTests(unittest.TestCase):
             self.assertEqual(session.status, "active:waitingOnApproval")
             self.assertEqual(session.size_bytes, 5)
 
+    def test_unknown_session_sizes_keep_failure_reasons(self) -> None:
+        thread = {"id": "a", "cwd": "/repo", "updatedAt": 1_790_251_200}
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "session.jsonl"
+            missing_path = codu.session_from_thread(thread, "active")
+            missing_file = codu.session_from_thread(dict(thread, path=str(path)), "active")
+            path.touch()
+            empty = codu.session_from_thread(dict(thread, path=str(path)), "active")
+            with patch.object(Path, "stat", side_effect=PermissionError("access denied")):
+                denied = codu.session_from_thread(dict(thread, path=str(path)), "active")
+            for session in (missing_path, missing_file, denied):
+                self.assertIsNone(session.size_bytes)
+                self.assertEqual(codu.human_size(session.size_bytes), "?")
+            self.assertIn("未提供", missing_path.size_error)
+            self.assertIn("不存在", missing_file.size_error)
+            self.assertIn("access denied", denied.size_error)
+            self.assertEqual(empty.size_bytes, 0)
+            self.assertIsNone(empty.size_error)
+            self.assertEqual(codu.human_size(empty.size_bytes), "0B")
+
+    def test_unknown_sizes_in_outputs_sorting_and_confirmation(self) -> None:
+        base = codu.Session(
+            updated=codu.datetime.fromisoformat("2026-09-24T08:00:00+00:00"),
+            state="active", status="notLoaded", session_id="unknown",
+            size_bytes=None, size_error="会话文件不存在", title="Unknown", cwd="/repo", path=None,
+        )
+        zero = codu.replace(base, session_id="zero", size_bytes=0, size_error=None)
+        large = codu.replace(base, session_id="large", size_bytes=1024, size_error=None)
+        sessions = [base, zero, large]
+        for descending, expected in [(True, ["large", "zero", "unknown"]),
+                                     (False, ["zero", "large", "unknown"])]:
+            self.assertEqual(
+                [item.session_id for item in codu.filter_and_sort_sessions(
+                    sessions, "", "size", descending
+                )], expected,
+            )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            codu.print_json(sessions)
+        values = json.loads(output.getvalue())
+        self.assertIsNone(values[0]["size_bytes"])
+        self.assertEqual(values[0]["size_error"], "会话文件不存在")
+        self.assertEqual(values[1]["size_bytes"], 0)
+        self.assertIsNone(values[1]["size_error"])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            codu.print_tsv(sessions)
+        self.assertIn("\t?\t", output.getvalue())
+        self.assertIn("\t0B\t", output.getvalue())
+        self.assertEqual(codu.session_size_summary([zero]), "0B")
+        self.assertIn("3 个会话大小未知", codu.session_size_summary([base] * 3))
+        screen = Mock()
+        screen.getmaxyx.return_value = (30, 160)
+        browser = codu.SessionBrowser(screen, sessions)
+        browser.draw_context = Mock()
+        browser.draw_list()
+        self.assertIn("已知大小 1.0K，1 个会话大小未知", browser.draw_context.call_args.args[1])
+        browser.select_session("unknown")
+        browser.draw_detail()
+        self.assertTrue(any("大小未知：会话文件不存在" in str(call)
+                            for call in screen.addstr.call_args_list))
+        browser.marked = {item.session_id for item in sessions}
+        browser.confirm_delete = Mock(return_value=False)
+        with patch.object(codu, "run_codex_action") as action:
+            browser.delete_targets()
+        self.assertIn("已知大小 1.0K，1 个会话大小未知", browser.confirm_delete.call_args.args[0])
+        action.assert_not_called()
+
     def test_app_server_launches_platform_executable(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             executable = write_fake_codex(Path(temp))
@@ -485,6 +553,12 @@ class CoduTests(unittest.TestCase):
             browser.toggle_archive()
 
         self.assertEqual(browser.current().session_id, "active-session")
+        self.assertIsNone(browser.current().path)
+        self.assertIsNone(browser.current().size_bytes)
+        self.assertIn("待刷新", browser.current().size_error)
+        unchanged = next(item for item in browser.sessions if item.session_id == "archived-session")
+        self.assertEqual(unchanged.size_bytes, 20)
+        self.assertIsNone(unchanged.size_error)
 
     def test_app_server_timeout_cleans_up_process(self) -> None:
         client = codu.AppServerClient(

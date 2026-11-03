@@ -57,15 +57,15 @@ Formula 源文件位于 [`packaging/homebrew/codu.rb`](packaging/homebrew/codu.r
 推荐用 `uv` 安装固定版本的通用 wheel：
 
 ```console
-uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.1/codu-0.3.1-py3-none-any.whl
+uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.2/codu-0.3.2-py3-none-any.whl
 codu --version
 ```
 
 也支持普通 `pip` 或 `pipx`：
 
 ```console
-python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.1/codu-0.3.1-py3-none-any.whl
-pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.1/codu-0.3.1-py3-none-any.whl
+python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.2/codu-0.3.2-py3-none-any.whl
+pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.2/codu-0.3.2-py3-none-any.whl
 ```
 
 Windows 推荐使用 Windows Terminal 和 PowerShell；在 PowerShell 中可将 `python` 替换为 `py`。
@@ -208,15 +208,18 @@ app-server 路径使用 `thread/list` 的分页与目录筛选，并读取 Codex
 | `status` / STATUS | app-server 看到的运行状态；文件回退时为 `unknown` |
 | `updated` / UPDATED | 最近更新时间，本地时区显示 |
 | `session_id` / SESSION_ID | Codex 会话/线程 ID |
-| `size_bytes` / SIZE | 当前会话 JSONL 文件大小 |
+| `size_bytes` / SIZE | 当前会话 JSONL 文件大小；未知时 JSON 为 `null`，表格为 `?` |
+| `size_error` | 大小未知的原因；成功读取时为 `null` |
 | `title` / NAME / INTRO | `/rename` 名称，或首条可识别的用户请求 |
 | `cwd` / CWD | 会话记录的工作目录 |
 | `path` | 会话 JSONL 文件路径，仅 JSON 输出 |
 
 ```console
-codu --json | jq '.[] | select(.size_bytes > 1048576)'
+codu --json | jq '.[] | select(.size_bytes != null and .size_bytes > 1048576)'
 codu --plain | column -t -s $'\t'
 ```
+
+会话大小仅在成功读取文件后显示为数值（包括真实的 `0B`）。大小未知的会话在按大小排序时始终置后；汇总及删除确认只统计已知大小，并注明未知数量。归档或恢复后，文件路径及大小需重新启动 codu 获取。
 
 ## 安全模型
 

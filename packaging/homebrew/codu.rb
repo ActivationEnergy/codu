@@ -5,9 +5,9 @@
 class Codu < Formula
   desc "Browse local Codex sessions and data in an ncdu-style TUI"
   homepage "https://github.com/ActivationEnergy/codu"
-  url "https://raw.githubusercontent.com/ActivationEnergy/codu/v0.3.1/codu.py"
-  version "0.3.1"
-  sha256 "7e88de30065596e16427b5b444708c6abc73046cc446d0fcee3d764f545ad093"
+  url "https://raw.githubusercontent.com/ActivationEnergy/codu/v0.3.2/codu.py"
+  version "0.3.2"
+  sha256 "6699eb173d51827985d8e5d38f8ae1863fd37f1fe28309e1ff7054fd90a1628a"
   license "MIT"
 
   depends_on "python@3.14"
@@ -18,7 +18,7 @@ class Codu < Formula
   end
 
   test do
-    assert_match "codu 0.3.1", shell_output("#{bin}/codu --version")
+    assert_match "codu 0.3.2", shell_output("#{bin}/codu --version")
     assert_match "usage: codu", shell_output("#{bin}/codu --help")
   end
 end

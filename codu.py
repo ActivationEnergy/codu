@@ -46,7 +46,7 @@ INJECTED_USER_PREFIXES = (
 )
 
 DEFAULT_OPERATION_TIMEOUT = 30.0
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 
 @dataclass(frozen=True)
@@ -57,10 +57,11 @@ class Session:
     state: str
     status: str
     session_id: str
-    size_bytes: int
+    size_bytes: int | None
     title: str
     cwd: str
     path: Path | None
+    size_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -501,10 +502,17 @@ def session_from_thread(thread: dict[str, object], state: str) -> Session | None
 
     raw_path = thread.get("path")
     path = Path(raw_path) if isinstance(raw_path, str) and raw_path else None
-    try:
-        size = path.stat().st_size if path is not None else 0
-    except OSError:
-        size = 0
+    size = None
+    size_error = None
+    if path is None:
+        size_error = "未提供会话文件路径"
+    else:
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:
+            size_error = "会话文件不存在"
+        except OSError as error:
+            size_error = f"无法读取文件大小：{error}"
 
     name = thread.get("name")
     preview = thread.get("preview")
@@ -518,6 +526,7 @@ def session_from_thread(thread: dict[str, object], state: str) -> Session | None
         status=status_name(thread.get("status")),
         session_id=session_id,
         size_bytes=size,
+        size_error=size_error,
         title=normalize_text(title),
         cwd=cwd,
         path=path,
@@ -736,14 +745,25 @@ def discover_sessions(root: Path, directory: Path | None = None) -> list[Session
     return sorted(rows.values(), key=lambda row: row.updated, reverse=True)
 
 
-def human_size(size: int) -> str:
-    """Format a byte count using compact binary units."""
+def human_size(size: int | None) -> str:
+    """Format a byte count using compact binary units, or ? when unknown."""
+    if size is None:
+        return "?"
     value = float(size)
     for unit in ("B", "K", "M", "G", "T"):
         if value < 1024 or unit == "T":
             return f"{int(value)}{unit}" if unit == "B" else f"{value:.1f}{unit}"
         value /= 1024
     raise AssertionError("unreachable")
+
+
+def session_size_summary(sessions: Sequence[Session]) -> str:
+    """Summarize known bytes without treating unavailable sizes as zero."""
+    total = sum(item.size_bytes for item in sessions if item.size_bytes is not None)
+    unknown = sum(item.size_bytes is None for item in sessions)
+    if unknown:
+        return f"已知大小 {human_size(total)}，{unknown} 个会话大小未知"
+    return human_size(total)
 
 
 def shorten_home(path: str) -> str:
@@ -872,9 +892,12 @@ def filter_and_sort_sessions(
             f"{session.state} {session.status}"
         ).casefold()
     ]
+    if sort_key == "size":
+        known = [item for item in values if item.size_bytes is not None]
+        unknown = [item for item in values if item.size_bytes is None]
+        return sorted(known, key=lambda item: item.size_bytes, reverse=descending) + unknown
     key_functions = {
         "state": lambda item: (item.state.casefold(), item.status.casefold()),
-        "size": lambda item: item.size_bytes,
         "updated": lambda item: item.updated,
         "title": lambda item: item.title.casefold(),
         "cwd": lambda item: item.cwd.casefold(),
@@ -1095,12 +1118,11 @@ class SessionBrowser:
 
         height, width = self.screen.getmaxyx()
         values = self.visible
-        total_size = sum(item.size_bytes for item in values)
         direction = "↓" if self.sort_descending else "↑"
         summary = f"全部会话 {len(values)}/{len(self.sessions)}"
         if self.query:
             summary += f"  搜索:{self.query}"
-        self.draw_context(summary, f"{human_size(total_size)}  排序 {self.sort_key}{direction}")
+        self.draw_context(summary, f"{session_size_summary(values)}  排序 {self.sort_key}{direction}")
 
         title_width, cwd_width = session_column_widths(width)
         headings = {
@@ -1161,7 +1183,11 @@ class SessionBrowser:
             ("State", session.state),
             ("Runtime status", session.status),
             ("Updated", session.updated.astimezone().isoformat(timespec="seconds")),
-            ("Size", f"{human_size(session.size_bytes)} ({session.size_bytes} bytes)"),
+            ("Size", (
+                f"{human_size(session.size_bytes)} ({session.size_bytes} bytes)"
+                if session.size_bytes is not None
+                else f"大小未知：{session.size_error or '尚未获取文件大小'}"
+            )),
             ("Working directory", session.cwd),
             ("Session file", str(session.path) if session.path else "（不可用）"),
         ]
@@ -1352,7 +1378,7 @@ class SessionBrowser:
         targets = self.targets()
         if not targets:
             return
-        total = human_size(sum(item.size_bytes for item in targets))
+        total = session_size_summary(targets)
         active = any(item.status.startswith("active") for item in targets)
         warning = "，包含正在运行的会话" if active else ""
         confirm_all_before = self.delete_confirm_all
@@ -1400,6 +1426,11 @@ class SessionBrowser:
                 item,
                 state=changed.get(item.session_id, item.state),
                 path=None if item.session_id in changed else item.path,
+                size_bytes=None if item.session_id in changed else item.size_bytes,
+                size_error=(
+                    "归档状态已变更，文件路径待刷新"
+                    if item.session_id in changed else item.size_error
+                ),
             )
             for item in self.sessions
         ]
