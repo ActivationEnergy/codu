@@ -15,7 +15,7 @@ import threading
 import time
 import unicodedata
 from collections import deque
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -46,7 +46,7 @@ INJECTED_USER_PREFIXES = (
 )
 
 DEFAULT_OPERATION_TIMEOUT = 30.0
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 
 @dataclass(frozen=True)
@@ -273,6 +273,64 @@ def data_advice(entries: Sequence[DataEntry]) -> list[str]:
         f"插件 {human_size(plugins.size_bytes if plugins else 0)}、.tmp {human_size(temporary.size_bytes if temporary else 0)}：用 Codex 卸载不用的插件；.tmp 可能正在使用。",
         f"缓存 {human_size(cache.size_bytes if cache else 0)}：未验证各子目录的清理契约，先查看用途。",
     ]
+
+
+class StartupProgress:
+    """Animate startup on stderr while discovery blocks on I/O.
+
+    The bar is indeterminate: Codex does not supply a total session count.
+    Stop and clear it before curses or any final output takes over the terminal.
+    """
+
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self.stream = sys.stderr
+        self.message = "正在准备读取会话"
+        self.started = time.monotonic()
+        self.stopped = threading.Event()
+        self.lock = threading.Lock()
+        self.thread: threading.Thread | None = None
+
+    def __enter__(self) -> Self:
+        if self.enabled:
+            self.started = time.monotonic()
+            self._draw(0)
+            self.thread = threading.Thread(
+                target=self._animate, name="codu-startup-progress", daemon=True
+            )
+            self.thread.start()
+        return self
+
+    def update(self, message: str) -> None:
+        if self.enabled:
+            with self.lock:
+                self.message = message
+
+    def _draw(self, frame: int) -> None:
+        position = frame % 20
+        position = position if position <= 10 else 20 - position
+        bar = " " * position + "====" + " " * (10 - position)
+        with self.lock:
+            message = self.message
+        elapsed = time.monotonic() - self.started
+        line = f"codu [{bar}] {elapsed:.1f}s {message}"
+        width = shutil.get_terminal_size(fallback=(80, 24)).columns
+        self.stream.write("\r\033[2K" + fit_text(line, max(1, width - 1)))
+        self.stream.flush()
+
+    def _animate(self) -> None:
+        frame = 1
+        while not self.stopped.wait(0.1):
+            self._draw(frame)
+            frame += 1
+
+    def __exit__(self, *_: object) -> None:
+        self.stopped.set()
+        if self.thread is not None:
+            self.thread.join()
+        if self.enabled:
+            self.stream.write("\r\033[2K")
+            self.stream.flush()
 
 
 class AppServerError(RuntimeError):
@@ -537,10 +595,17 @@ def list_app_server_page(
     client: AppServerClient,
     state: str,
     directory: Path | None,
+    progress: Callable[[str], None] | None = None,
 ) -> Iterable[Session]:
     """Yield every session from one active or archived app-server listing."""
     cursor: str | None = None
+    page = 0
+    count = 0
+    label = "已归档" if state == "archived" else "未归档"
     while True:
+        page += 1
+        if progress:
+            progress(f"正在读取{label}会话：第 {page} 页，已读取 {count} 个")
         params: dict[str, object] = {
             "archived": state == "archived",
             "cursor": cursor,
@@ -561,6 +626,7 @@ def list_app_server_page(
                 continue
             session = session_from_thread(value, state)
             if session is not None:
+                count += 1
                 yield session
 
         next_cursor = result.get("nextCursor")
@@ -569,7 +635,10 @@ def list_app_server_page(
         cursor = next_cursor
 
 
-def discover_sessions_from_app_server(directory: Path | None = None) -> list[Session]:
+def discover_sessions_from_app_server(
+    directory: Path | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> list[Session]:
     """List sessions through the supported Codex app-server interface."""
     executable = os.environ.get("CODEX_BIN") or shutil.which("codex")
     if not executable:
@@ -583,12 +652,19 @@ def discover_sessions_from_app_server(directory: Path | None = None) -> list[Ses
     for command in commands:
         rows: dict[str, Session] = {}
         try:
+            if progress:
+                progress(
+                    "正在连接已有的 Codex 服务"
+                    if command[-1] == "proxy" else "连接未成功，正在启动独立 Codex 服务"
+                )
             with AppServerClient(command) as client:
                 for state in ("active", "archived"):
-                    for session in list_app_server_page(client, state, directory):
+                    for session in list_app_server_page(client, state, directory, progress):
                         existing = rows.get(session.session_id)
                         if existing is None or session.updated > existing.updated:
                             rows[session.session_id] = session
+                if progress:
+                    progress(f"已读取 {len(rows)} 个会话，正在结束查询连接")
             return sorted(rows.values(), key=lambda row: row.updated, reverse=True)
         except AppServerError as error:
             errors.append(str(error))
@@ -694,18 +770,30 @@ def load_session_index(root: Path) -> dict[str, str]:
     return titles
 
 
-def discover_sessions(root: Path, directory: Path | None = None) -> list[Session]:
+def discover_sessions(
+    root: Path,
+    directory: Path | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> list[Session]:
     """Compatibility fallback for Codex versions without app-server thread/list."""
+    if progress:
+        progress("Codex 服务不可用，正在读取本地会话索引")
     titles = load_session_index(root)
     rows: dict[str, Session] = {}
+    checked = 0
 
     for relative, state in (("sessions", "active"), ("archived_sessions", "archived")):
         session_dir = root / relative
+        if progress:
+            progress(f"正在扫描 {relative}/，已检查 {checked} 个文件")
         if not session_dir.is_dir():
             continue
         try:
             paths: Iterable[Path] = session_dir.rglob("*.jsonl")
             for path in paths:
+                checked += 1
+                if progress:
+                    progress(f"正在扫描 {relative}/，已检查 {checked} 个文件")
                 meta, intro, updated = read_session(path)
                 if meta is None:
                     continue
@@ -1729,15 +1817,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
     directory = canonical_directory(args.directory) if args.directory else None
 
+    interactive = not (args.json or args.plain) and sys.stdin.isatty() and sys.stdout.isatty()
+    fallback_error = None
     try:
-        sessions = discover_sessions_from_app_server(directory)
-    except AppServerError as error:
-        if args.verbose:
-            print(
-                f"codu: app-server 不可用，回退到文件扫描：{error}",
-                file=sys.stderr,
-            )
-        sessions = discover_sessions(root, directory)
+        with StartupProgress(interactive and sys.stderr.isatty()) as progress:
+            try:
+                sessions = discover_sessions_from_app_server(directory, progress.update)
+            except AppServerError as error:
+                fallback_error = error
+                sessions = discover_sessions(root, directory, progress.update)
+    except KeyboardInterrupt:
+        print("codu: 已取消读取会话", file=sys.stderr)
+        return 130
+    if args.verbose and fallback_error is not None:
+        print(
+            f"codu: app-server 不可用，回退到文件扫描：{fallback_error}",
+            file=sys.stderr,
+        )
 
     if args.json:
         print_json(sessions)

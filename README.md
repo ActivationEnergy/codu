@@ -57,15 +57,15 @@ Formula 源文件位于 [`packaging/homebrew/codu.rb`](packaging/homebrew/codu.r
 推荐用 `uv` 安装固定版本的通用 wheel：
 
 ```console
-uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.2/codu-0.3.2-py3-none-any.whl
+uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.3/codu-0.3.3-py3-none-any.whl
 codu --version
 ```
 
 也支持普通 `pip` 或 `pipx`：
 
 ```console
-python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.2/codu-0.3.2-py3-none-any.whl
-pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.2/codu-0.3.2-py3-none-any.whl
+python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.3/codu-0.3.3-py3-none-any.whl
+pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.3/codu-0.3.3-py3-none-any.whl
 ```
 
 Windows 推荐使用 Windows Terminal 和 PowerShell；在 PowerShell 中可将 `python` 替换为 `py`。
@@ -185,6 +185,8 @@ usage: codu [-h] [--json | --plain] [--verbose] [--version] [directory]
 `A` 不会写入配置；退出程序后恢复逐次确认。
 
 ## 数据来源与工作方式
+
+交互启动时会立即显示当前阶段、动态进度条和已耗时；分页读取显示页数及已读取数量，兼容回退显示扫描文件数。总量未知时不显示百分比。按 `Ctrl+C` 可取消读取。`--json`、`--plain` 及重定向输出不会显示启动动画。
 
 程序按以下顺序获取会话：
 

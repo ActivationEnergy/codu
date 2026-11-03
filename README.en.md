@@ -57,15 +57,15 @@ The formula source is [`packaging/homebrew/codu.rb`](packaging/homebrew/codu.rb)
 The recommended path is to install the versioned universal wheel with `uv`:
 
 ```console
-uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.2/codu-0.3.2-py3-none-any.whl
+uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.3/codu-0.3.3-py3-none-any.whl
 codu --version
 ```
 
 Regular `pip` and `pipx` are also supported:
 
 ```console
-python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.2/codu-0.3.2-py3-none-any.whl
-pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.2/codu-0.3.2-py3-none-any.whl
+python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.3/codu-0.3.3-py3-none-any.whl
+pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.3/codu-0.3.3-py3-none-any.whl
 ```
 
 On Windows, use Windows Terminal with PowerShell; replace `python` with `py` in the command above when needed.
@@ -185,6 +185,8 @@ Delete confirmation:
 `A` is not persisted. Normal per-operation confirmation returns after codu exits.
 
 ## Data sources and behavior
+
+Interactive startup immediately shows the current stage, an animated progress bar, and elapsed time. Pagination reports pages and sessions read; the compatibility fallback reports files scanned. No percentage is shown when the total is unknown. Press `Ctrl+C` to cancel loading. Startup animation is disabled for `--json`, `--plain`, and redirected output.
 
 codu discovers sessions in this order:
 

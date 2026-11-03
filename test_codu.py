@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -375,6 +376,105 @@ class CoduTests(unittest.TestCase):
             self.assertEqual(session.title, "Renamed session")
             self.assertEqual(session.status, "active:waitingOnApproval")
             self.assertEqual(session.size_bytes, 5)
+
+    def test_startup_progress_animates_during_wait_and_cleans_up_on_failure(self) -> None:
+        refreshed = threading.Event()
+
+        class ProgressStream(io.StringIO):
+            def write(self, text: str) -> int:
+                result = super().write(text)
+                if "等待测试响应" in text:
+                    refreshed.set()
+                return result
+
+        output = ProgressStream()
+        with (
+            contextlib.redirect_stderr(output),
+            self.assertRaisesRegex(RuntimeError, "discovery failed"),
+            codu.StartupProgress(True) as progress,
+        ):
+            self.assertIn("正在准备读取会话", output.getvalue())
+            progress.update("等待测试响应")
+            self.assertTrue(refreshed.wait(2), "progress froze during blocking discovery")
+            raise RuntimeError("discovery failed")
+        self.assertFalse(progress.thread.is_alive())
+        self.assertTrue(output.getvalue().endswith("\r\033[2K"))
+        self.assertIn("====", output.getvalue())
+
+    def test_interactive_startup_clears_progress_before_entering_tui(self) -> None:
+        output, errors = io.StringIO(), io.StringIO()
+        output.isatty = lambda: True
+        errors.isatty = lambda: True
+
+        def discover(directory, progress):
+            self.assertIn("正在准备读取会话", errors.getvalue())
+            progress("正在读取会话")
+            return []
+
+        def enter_tui(sessions, root):
+            self.assertTrue(errors.getvalue().endswith("\r\033[2K"))
+            self.assertFalse(any(thread.name == "codu-startup-progress"
+                                 for thread in threading.enumerate()))
+
+        with (
+            contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors),
+            patch.object(codu.sys.stdin, "isatty", return_value=True),
+            patch.object(codu, "discover_sessions_from_app_server", side_effect=discover),
+            patch.object(codu, "run_tui", side_effect=enter_tui) as tui,
+        ):
+            self.assertEqual(codu.main([]), 0)
+        tui.assert_called_once()
+        self.assertEqual(output.getvalue(), "")
+
+    def test_startup_reports_connection_pagination_and_fallback(self) -> None:
+        updates = []
+        client = Mock()
+        client.__enter__ = Mock(side_effect=[codu.AppServerError("unavailable"), client])
+        client.__exit__ = Mock(return_value=False)
+        client.request.side_effect = [
+            {"data": [], "nextCursor": "page-two"},
+            {"data": [], "nextCursor": None},
+            {"data": [], "nextCursor": None},
+        ]
+        with patch.object(codu, "AppServerClient", return_value=client), patch.dict(
+            os.environ, {"CODEX_BIN": "fake-codex"}
+        ):
+            self.assertEqual(codu.discover_sessions_from_app_server(progress=updates.append), [])
+        self.assertIn("正在连接已有的 Codex 服务", updates)
+        self.assertIn("连接未成功，正在启动独立 Codex 服务", updates)
+        self.assertTrue(any("未归档会话：第 2 页" in value for value in updates))
+        self.assertTrue(any("已归档会话" in value for value in updates))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_session(root / "sessions/a.jsonl", "a", root)
+            updates.clear()
+            self.assertEqual(len(codu.discover_sessions(root, progress=updates.append)), 1)
+        self.assertTrue(any("读取本地会话索引" in value for value in updates))
+        self.assertTrue(any("已检查 1 个文件" in value for value in updates))
+
+    def test_startup_progress_leaves_machine_output_clean_and_handles_cancel(self) -> None:
+        for args in (["--json"], ["--plain"], []):
+            with self.subTest(args=args):
+                output, errors = io.StringIO(), io.StringIO()
+                with (
+                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors),
+                    patch.object(codu.sys.stdin, "isatty", return_value=True),
+                    patch.object(codu, "discover_sessions_from_app_server", return_value=[]),
+                ):
+                    self.assertEqual(codu.main(args), 0)
+                self.assertEqual(errors.getvalue(), "")
+                if args == ["--json"]:
+                    self.assertEqual(json.loads(output.getvalue()), [])
+                else:
+                    self.assertTrue(output.getvalue().startswith("STATE\t"))
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors),
+            patch.object(codu, "discover_sessions_from_app_server", side_effect=KeyboardInterrupt),
+        ):
+            self.assertEqual(codu.main([]), 130)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn("已取消读取会话", errors.getvalue())
 
     def test_unknown_session_sizes_keep_failure_reasons(self) -> None:
         thread = {"id": "a", "cwd": "/repo", "updatedAt": 1_790_251_200}
