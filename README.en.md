@@ -281,7 +281,7 @@ python3 -m unittest -v
 ruff check codu.py test_codu.py
 ```
 
-CI runs on Linux, macOS, and Windows with Python 3.11 and 3.14, plus Python 3.12 and 3.13 on Linux. Current tests cover discovery, directory filtering, renamed-title and preview fallback, timestamp parsing, JSON output, app-server mapping and lifecycle, request timeout, stderr draining, selection preservation after archive, cross-platform resume invocation, filtering and sorting, wide-character clipping, and confirmation key mapping. Real archive/delete operations and the complete curses state machine still need automated coverage.
+Run unit tests and Ruff locally before a release. GitHub Actions only builds and uploads wheel and source packages when a version tag is pushed. Current tests cover discovery, directory filtering, renamed-title and preview fallback, timestamp parsing, JSON output, app-server mapping and lifecycle, request timeout, stderr draining, selection preservation after archive, cross-platform resume invocation, filtering and sorting, wide-character clipping, and confirmation key mapping. Real archive/delete operations and the complete curses state machine still need automated coverage.
 
 ## Contributing
 
@@ -295,7 +295,7 @@ Issues and pull requests are welcome. When fixing a bug or changing behavior:
 ## Pre-release checklist
 
 - [x] Use the MIT License and add `LICENSE` at the repository root
-- [x] Add CI for Python 3.11–3.14 on Linux/macOS/Windows with Ruff and unit tests
+- [x] Build and upload wheel and source packages on version tags
 - [x] Create `ActivationEnergy/codu`, publish `v0.1.0`, and sync the formula to `ActivationEnergy/homebrew-cask`
 - [ ] Add a real but redacted terminal screenshot or demo
 - [ ] Confirm the repository contains no real Codex transcripts, credentials, or local-path data

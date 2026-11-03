@@ -283,7 +283,7 @@ python3 -m unittest -v
 ruff check codu.py test_codu.py
 ```
 
-CI 在 Linux、macOS 和 Windows 的 Python 3.11 与 3.14 上运行，并额外覆盖 Linux 的 Python 3.12 与 3.13。当前测试覆盖会话发现、目录筛选、重命名与简介回退、时间解析、JSON 输出、app-server 字段映射与生命周期、请求超时、stderr 排空、归档后选择保持、跨平台恢复命令、搜索排序、宽字符裁剪以及删除确认按键。真实归档/删除和完整 curses 状态机仍需要更多自动化覆盖。
+发布前在本地运行单元测试和 Ruff；GitHub Actions 仅在推送版本 tag 时构建并上传 wheel 与源码包。当前测试覆盖会话发现、目录筛选、重命名与简介回退、时间解析、JSON 输出、app-server 字段映射与生命周期、请求超时、stderr 排空、归档后选择保持、跨平台恢复命令、搜索排序、宽字符裁剪以及删除确认按键。真实归档/删除和完整 curses 状态机仍需要更多自动化覆盖。
 
 ## 贡献
 
@@ -297,7 +297,7 @@ CI 在 Linux、macOS 和 Windows 的 Python 3.11 与 3.14 上运行，并额外�
 ## 开源发布前检查
 
 - [x] 使用 MIT 许可证并在仓库根目录添加 `LICENSE`
-- [x] 增加 CI（Python 3.11–3.14、Linux/macOS/Windows、Ruff 和单元测试）
+- [x] 版本 tag 自动构建并上传 wheel 与源码包
 - [x] 创建 `ActivationEnergy/codu`，发布 `v0.1.0`，并将 Formula 同步到 `ActivationEnergy/homebrew-cask`
 - [ ] 增加真实但已脱敏的终端截图或演示
 - [ ] 确认仓库中没有真实 Codex 会话、凭据或本地路径数据
