@@ -7,6 +7,7 @@ import os
 import queue
 import re
 import shutil
+import socket
 import sqlite3
 import stat
 import subprocess
@@ -21,6 +22,8 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Self
+
+from websocket import WebSocketException, WebSocketTimeoutException, create_connection
 
 APP_SERVER_SOURCE_KINDS = [
     "cli",
@@ -46,7 +49,8 @@ INJECTED_USER_PREFIXES = (
 )
 
 DEFAULT_OPERATION_TIMEOUT = 30.0
-__version__ = "0.3.3"
+SHARED_HANDSHAKE_TIMEOUT = 2.0
+__version__ = "0.3.4"
 
 
 @dataclass(frozen=True)
@@ -338,11 +342,47 @@ class AppServerError(RuntimeError):
 
 
 class AppServerClient:
-    """Small synchronous client for Codex app-server's JSONL transport."""
+    """Synchronous JSON-RPC client over local WebSocket or child-process JSONL."""
 
     _EOF = object()
 
-    def __init__(self, command: Sequence[str], timeout: float | None = None) -> None:
+    def __init__(
+        self,
+        command: Sequence[str] = (),
+        timeout: float | None = None,
+        *,
+        socket_path: Path | None = None,
+    ) -> None:
+        self.connection = None
+        self.next_id = 0
+        self.timeout = operation_timeout() if timeout is None else timeout
+        self.stderr_lines: deque[str] = deque(maxlen=100)
+        self.closed = False
+        self.initialize_deadline: float | None = None
+        if socket_path is not None:
+            if not hasattr(socket, "AF_UNIX") or os.name == "nt":
+                raise AppServerError("shared Unix socket is unavailable on this platform")
+            self.initialize_deadline = time.monotonic() + min(
+                SHARED_HANDSHAKE_TIMEOUT, self.timeout
+            )
+            local_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                local_socket.settimeout(self._initialize_remaining())
+                local_socket.connect(str(socket_path))
+                # The control socket expects WebSocket HTTP Upgrade, not JSONL.
+                # A supplied Unix socket also avoids HTTP proxy environment settings.
+                self.connection = create_connection(
+                    "ws://localhost/",
+                    socket=local_socket,
+                    timeout=self._initialize_remaining(),
+                    suppress_origin=True,
+                )
+            except BaseException as error:
+                local_socket.close()
+                if isinstance(error, (OSError, WebSocketException)):
+                    raise AppServerError(f"shared WebSocket connection: {error}") from error
+                raise
+            return
         try:
             self.process = subprocess.Popen(
                 command,
@@ -355,11 +395,7 @@ class AppServerClient:
             )
         except OSError as error:
             raise AppServerError(str(error)) from error
-        self.next_id = 0
-        self.timeout = operation_timeout() if timeout is None else timeout
         self.stdout_lines: queue.Queue[str | object] = queue.Queue()
-        self.stderr_lines: deque[str] = deque(maxlen=100)
-        self.closed = False
         self.stdout_thread = threading.Thread(
             target=self._read_stdout,
             name="codu-app-server-stdout",
@@ -372,6 +408,15 @@ class AppServerClient:
         )
         self.stdout_thread.start()
         self.stderr_thread.start()
+
+    def _initialize_remaining(self) -> float:
+        """Share one deadline across Unix connect, WebSocket upgrade, and initialize."""
+        if self.initialize_deadline is None:
+            return self.timeout
+        remaining = self.initialize_deadline - time.monotonic()
+        if remaining <= 0:
+            raise AppServerError("shared service handshake timed out")
+        return remaining
 
     def _read_stdout(self) -> None:
         if self.process.stdout is None:
@@ -400,6 +445,7 @@ class AppServerClient:
                         "version": __version__,
                     }
                 },
+                timeout=self._initialize_remaining(),
             )
             self.notify("initialized", {})
             return self
@@ -414,6 +460,10 @@ class AppServerClient:
         if self.closed:
             return
         self.closed = True
+        if self.connection is not None:
+            self.connection.settimeout(0.2)
+            self.connection.close(timeout=0.2)
+            return
         if self.process.stdin is not None:
             try:
                 self.process.stdin.close()
@@ -437,6 +487,12 @@ class AppServerClient:
                 stream.close()
 
     def send(self, message: dict[str, object]) -> None:
+        if self.connection is not None:
+            try:
+                self.connection.send(json.dumps(message, separators=(",", ":")))
+            except (OSError, WebSocketException) as error:
+                raise AppServerError(f"WebSocket send: {error}") from error
+            return
         if self.process.stdin is None:
             raise AppServerError("app-server stdin is unavailable")
         try:
@@ -448,28 +504,43 @@ class AppServerClient:
     def notify(self, method: str, params: dict[str, object]) -> None:
         self.send({"method": method, "params": params})
 
-    def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+    def request(
+        self, method: str, params: dict[str, object], *, timeout: float | None = None
+    ) -> dict[str, object]:
+        request_timeout = self.timeout if timeout is None else timeout
+        deadline = time.monotonic() + request_timeout
+        if self.connection is not None:
+            self.connection.settimeout(request_timeout)
         request_id = self.next_id
         self.next_id += 1
         self.send({"method": method, "id": request_id, "params": params})
 
-        deadline = time.monotonic() + self.timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise AppServerError(
                     self.failure_message(
-                        f"{method}: timed out after {self.timeout:g} seconds"
+                        f"{method}: timed out after {request_timeout:g} seconds"
                     )
                 )
             try:
-                line = self.stdout_lines.get(timeout=remaining)
-            except queue.Empty as error:
+                if self.connection is None:
+                    line = self.stdout_lines.get(timeout=remaining)
+                else:
+                    self.connection.settimeout(remaining)
+                    line = self.connection.recv()
+                    if not line:
+                        raise AppServerError(f"{method}: WebSocket closed")
+                    if not isinstance(line, str):
+                        raise AppServerError(f"{method}: expected a WebSocket text message")
+            except (queue.Empty, WebSocketTimeoutException) as error:
                 raise AppServerError(
                     self.failure_message(
-                        f"{method}: timed out after {self.timeout:g} seconds"
+                        f"{method}: timed out after {request_timeout:g} seconds"
                     )
                 ) from error
+            except (OSError, WebSocketException) as error:
+                raise AppServerError(f"{method}: WebSocket receive: {error}") from error
             if line is self._EOF:
                 raise AppServerError(
                     self.failure_message(f"{method}: app-server exited")
@@ -645,19 +716,21 @@ def discover_sessions_from_app_server(
         raise AppServerError("codex executable was not found")
 
     errors: list[str] = []
-    commands = (
-        [executable, "app-server", "proxy"],
-        [executable, "app-server"],
-    )
-    for command in commands:
+    root = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
+    shared_socket = root / "app-server-control" / "app-server-control.sock"
+    for shared in (True, False):
         rows: dict[str, Session] = {}
         try:
             if progress:
                 progress(
                     "正在连接已有的 Codex 服务"
-                    if command[-1] == "proxy" else "连接未成功，正在启动独立 Codex 服务"
+                    if shared else "共享连接不可用，正在启动独立 Codex 服务"
                 )
-            with AppServerClient(command) as client:
+            connection = (
+                AppServerClient(socket_path=shared_socket)
+                if shared else AppServerClient([executable, "app-server"])
+            )
+            with connection as client:
                 for state in ("active", "archived"):
                     for session in list_app_server_page(client, state, directory, progress):
                         existing = rows.get(session.session_id)

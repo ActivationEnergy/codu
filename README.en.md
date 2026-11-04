@@ -24,7 +24,7 @@ This is an unofficial community project and is not affiliated with OpenAI.
 - Resume the selected Codex session directly from the browser
 - Non-interactive TSV and JSON output
 - Codex app-server first, with a local transcript scan fallback
-- Python standard library only on macOS and Linux; `windows-curses` on Windows
+- Uses `websocket-client` for shared connections; Windows also uses `windows-curses`
 
 ## Requirements
 
@@ -34,7 +34,7 @@ This is an unofficial community project and is not affiliated with OpenAI.
 | Codex CLI | The `codex` command is on `PATH` and configured normally |
 | Interactive terminal | macOS, Linux, or Windows Terminal (x64) |
 
-Package installation automatically installs `windows-curses` on Windows. When running directly from source with a Python build that cannot import `curses`, run `py -m pip install windows-curses` first. The `--plain` and `--json` modes do not require a full-screen terminal.
+Homebrew and Python package installations automatically install `websocket-client`; Python packages also install `windows-curses` on Windows. When running directly from source with a Python build that cannot import `curses`, run `py -m pip install windows-curses` first. The `--plain` and `--json` modes do not require a full-screen terminal.
 Native Windows support currently targets x64 Python because `windows-curses` does not provide a native ARM64 wheel.
 
 Session operations require the Codex CLI commands `app-server`, `archive`, `unarchive`, `delete`, and `resume`. Capabilities can differ between Codex versions.
@@ -50,22 +50,22 @@ brew tap ActivationEnergy/cask
 brew install codu
 ```
 
-The formula source is [`packaging/homebrew/codu.rb`](packaging/homebrew/codu.rb). It downloads one versioned single-file entry point, verifies its SHA256, and runs it with Homebrew Python; it does not build a Python package.
+The formula source is [`packaging/homebrew/codu.rb`](packaging/homebrew/codu.rb). It downloads one versioned single-file entry point, verifies its SHA256, and installs a pinned `websocket-client` in an isolated Homebrew Python environment; it does not build the codu Python package.
 
 ### uv / pip / pipx (Windows and Linux)
 
 The recommended path is to install the versioned universal wheel with `uv`:
 
 ```console
-uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.3/codu-0.3.3-py3-none-any.whl
+uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.4/codu-0.3.4-py3-none-any.whl
 codu --version
 ```
 
 Regular `pip` and `pipx` are also supported:
 
 ```console
-python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.3/codu-0.3.3-py3-none-any.whl
-pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.3/codu-0.3.3-py3-none-any.whl
+python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.4/codu-0.3.4-py3-none-any.whl
+pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.4/codu-0.3.4-py3-none-any.whl
 ```
 
 On Windows, use Windows Terminal with PowerShell; replace `python` with `py` in the command above when needed.
@@ -75,8 +75,9 @@ On Windows, use Windows Terminal with PowerShell; replace `python` with `py` in 
 On macOS or Linux:
 
 ```console
-chmod +x codu
-./codu
+uv venv
+uv pip install -e .
+.venv/bin/codu
 ```
 
 On Windows PowerShell:
@@ -190,8 +191,8 @@ Interactive startup immediately shows the current stage, an animated progress ba
 
 codu discovers sessions in this order:
 
-1. Connect to an existing shared app-server through `codex app-server proxy`.
-2. Start a temporary `codex app-server` when no shared service is available.
+1. Connect via WebSocket to `$CODEX_HOME/app-server-control/app-server-control.sock` to reuse the shared app-server. Unix connect, WebSocket upgrade, and JSON initialization share a 2-second deadline (or a shorter `CODU_TIMEOUT`). Windows skips this step.
+2. Start a temporary `codex app-server` over JSONL stdio when the shared service is unavailable. Queries retain `CODU_TIMEOUT`, independently of the short shared handshake deadline.
 3. If the app-server interface is unavailable, scan `$CODEX_HOME/sessions` and `$CODEX_HOME/archived_sessions`; `CODEX_HOME` defaults to `~/.codex`.
 
 The app-server path uses paginated `thread/list` calls and its exact working-directory filter. Titles, previews, status, timestamps, and transcript paths come from Codex. The compatibility fallback reads JSONL metadata and uses `session_index.jsonl` for names set through `/rename`.
@@ -279,8 +280,9 @@ Use a UTF-8 locale and a terminal font with proper wide-character support. codu 
 ## Development and verification
 
 ```console
-python3 -m pip install -e .
-python3 -m unittest -v
+uv venv
+uv pip install -e .
+.venv/bin/python -m unittest -v
 
 # Optional
 ruff check codu.py test_codu.py

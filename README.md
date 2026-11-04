@@ -24,7 +24,7 @@
 - 从浏览器直接进入选中的 Codex 会话
 - 支持 TSV 与 JSON 非交互输出
 - 优先使用 Codex app-server；不可用时回退到本地会话文件扫描
-- macOS 与 Linux 仅依赖 Python 标准库；Windows 使用 `windows-curses`
+- 使用 `websocket-client` 连接共享服务；Windows 额外使用 `windows-curses`
 
 ## 要求
 
@@ -34,7 +34,7 @@
 | Codex CLI | `codex` 命令在 `PATH` 中，并已完成正常配置 |
 | 交互终端 | macOS、Linux，或 Windows Terminal（x64） |
 
-通过 Python 包安装时，Windows 会自动安装 `windows-curses`。如果直接运行源码且 Python 无法导入 `curses`，请先运行 `py -m pip install windows-curses`；`--plain` 和 `--json` 不依赖全屏终端。
+通过 Homebrew 或 Python 包安装时会自动安装 `websocket-client`，Windows 的 Python 包还会自动安装 `windows-curses`。如果直接运行源码且 Python 无法导入 `curses`，请先运行 `py -m pip install windows-curses`；`--plain` 和 `--json` 不依赖全屏终端。
 Windows 原生支持以 x64 Python 为基线；`windows-curses` 当前没有原生 ARM64 wheel。
 
 会话操作依赖 Codex CLI 提供的 `app-server`、`archive`、`unarchive`、`delete` 和 `resume` 命令。不同 Codex 版本的能力可能不同。
@@ -50,22 +50,22 @@ brew tap ActivationEnergy/cask
 brew install codu
 ```
 
-Formula 源文件位于 [`packaging/homebrew/codu.rb`](packaging/homebrew/codu.rb)。它下载固定版本的单文件入口，校验 SHA256，并使用 Homebrew 的 Python 运行；不构建 Python 包。
+Formula 源文件位于 [`packaging/homebrew/codu.rb`](packaging/homebrew/codu.rb)。它下载固定版本的单文件入口，校验 SHA256，并使用 Homebrew 的 Python 隔离环境安装固定版本的 `websocket-client`；不构建 codu Python 包。
 
 ### uv / pip / pipx（Windows、Linux）
 
 推荐用 `uv` 安装固定版本的通用 wheel：
 
 ```console
-uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.3/codu-0.3.3-py3-none-any.whl
+uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.4/codu-0.3.4-py3-none-any.whl
 codu --version
 ```
 
 也支持普通 `pip` 或 `pipx`：
 
 ```console
-python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.3/codu-0.3.3-py3-none-any.whl
-pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.3/codu-0.3.3-py3-none-any.whl
+python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.4/codu-0.3.4-py3-none-any.whl
+pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.4/codu-0.3.4-py3-none-any.whl
 ```
 
 Windows 推荐使用 Windows Terminal 和 PowerShell；在 PowerShell 中可将 `python` 替换为 `py`。
@@ -75,8 +75,9 @@ Windows 推荐使用 Windows Terminal 和 PowerShell；在 PowerShell 中可将 
 macOS 或 Linux：
 
 ```console
-chmod +x codu
-./codu
+uv venv
+uv pip install -e .
+.venv/bin/codu
 ```
 
 Windows PowerShell：
@@ -190,8 +191,8 @@ usage: codu [-h] [--json | --plain] [--verbose] [--version] [directory]
 
 程序按以下顺序获取会话：
 
-1. 通过 `codex app-server proxy` 连接已运行的共享 app-server。
-2. 共享服务不可用时，临时启动 `codex app-server`。
+1. 通过 WebSocket 连接 `$CODEX_HOME/app-server-control/app-server-control.sock`，复用已运行的共享 app-server。连接、WebSocket 升级和 JSON 初始化合计最多等待 2 秒（若 `CODU_TIMEOUT` 更短则遵从更短值）；Windows 直接进入下一步。
+2. 共享服务不可用时，临时启动 `codex app-server`，通过 JSONL stdio 通信。查询继续使用 `CODU_TIMEOUT`，不受握手短超时限制。
 3. app-server 接口不可用时，扫描 `$CODEX_HOME/sessions` 和 `$CODEX_HOME/archived_sessions`；`CODEX_HOME` 未设置时默认为 `~/.codex`。
 
 app-server 路径使用 `thread/list` 的分页与目录筛选，并读取 Codex 返回的名称、简介、状态、时间和会话文件路径。兼容回退会读取 JSONL 元数据，并从 `session_index.jsonl` 获取 `/rename` 设置的名称。
@@ -281,8 +282,9 @@ codex unarchive --help
 ## 开发与验证
 
 ```console
-python3 -m pip install -e .
-python3 -m unittest -v
+uv venv
+uv pip install -e .
+.venv/bin/python -m unittest -v
 
 # 可选
 ruff check codu.py test_codu.py

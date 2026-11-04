@@ -26,6 +26,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
+  "websocket-client>=1.8,<2",
   "windows-curses>=2.4.2; sys_platform == 'win32'",
 ]
 

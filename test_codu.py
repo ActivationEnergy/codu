@@ -1,12 +1,16 @@
+import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -88,6 +92,86 @@ for line in sys.stdin:
     launcher.write_text(f"#!{sys.executable}\n{program}", encoding="utf-8")
     launcher.chmod(0o755)
     return launcher
+
+
+@contextlib.contextmanager
+def shared_socket_server(respond, upgrade_delay=0):
+    """Serve actual WebSocket frames on a temporary Codex control socket."""
+    with (
+        tempfile.TemporaryDirectory(prefix="cu-", dir="/tmp") as temp,
+        contextlib.ExitStack() as resources,
+    ):
+        root = Path(temp)
+        path = root / "app-server-control" / "app-server-control.sock"
+        path.parent.mkdir()
+        server = resources.enter_context(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM))
+        server.bind(str(path))
+        server.listen(1)
+        server.settimeout(2)
+        messages, errors = [], []
+
+        def serve():
+            try:
+                peer, _ = server.accept()
+                with peer, peer.makefile("rb") as stream:
+                    peer.settimeout(2)
+                    request_line = stream.readline()
+                    if request_line != b"GET / HTTP/1.1\r\n":
+                        raise AssertionError("client did not perform WebSocket upgrade")
+                    headers = {}
+                    while (line := stream.readline()) not in (b"\r\n", b""):
+                        key, value = line.decode().split(":", 1)
+                        headers[key.lower()] = value.strip()
+                    key = headers["sec-websocket-key"]
+                    threading.Event().wait(upgrade_delay)
+                    accept = base64.b64encode(hashlib.sha1(
+                        (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
+                    ).digest())
+                    peer.sendall(b"HTTP/1.1 101 Switching Protocols\r\n"
+                                 b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                                 b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n")
+                    while prefix := stream.read(2):
+                        opcode = prefix[0] & 15
+                        length = prefix[1] & 127
+                        if length == 126:
+                            length = int.from_bytes(stream.read(2), "big")
+                        elif length == 127:
+                            length = int.from_bytes(stream.read(8), "big")
+                        if not prefix[1] & 128:
+                            raise AssertionError("client frame was not masked")
+                        mask = stream.read(4)
+                        payload = stream.read(length)
+                        payload = bytes(value ^ mask[i % 4] for i, value in enumerate(payload))
+                        if opcode == 8:
+                            peer.sendall(b"\x88\x00")
+                            break
+                        message = json.loads(payload)
+                        messages.append(message)
+                        reply = respond(message)
+                        if reply is None:
+                            continue
+                        data = json.dumps(reply).encode()
+                        # Split the response into WebSocket continuation frames.
+                        split = len(data) // 2
+                        for opcode, part in [(1, data[:split]), (128, data[split:])]:
+                            header = bytes([opcode, len(part)]) if len(part) < 126 else (
+                                bytes([opcode, 126]) + len(part).to_bytes(2, "big")
+                            )
+                            peer.sendall(header + part)
+            except (OSError, ValueError, KeyError, AssertionError) as error:
+                errors.append(error)
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            yield root, path, messages
+        finally:
+            server.close()
+            thread.join(3)
+            if thread.is_alive():
+                raise AssertionError("shared socket fixture did not stop")
+            if errors:
+                raise errors[0]
 
 
 class CoduTests(unittest.TestCase):
@@ -441,7 +525,7 @@ class CoduTests(unittest.TestCase):
         ):
             self.assertEqual(codu.discover_sessions_from_app_server(progress=updates.append), [])
         self.assertIn("正在连接已有的 Codex 服务", updates)
-        self.assertIn("连接未成功，正在启动独立 Codex 服务", updates)
+        self.assertIn("共享连接不可用，正在启动独立 Codex 服务", updates)
         self.assertTrue(any("未归档会话：第 2 页" in value for value in updates))
         self.assertTrue(any("已归档会话" in value for value in updates))
         with tempfile.TemporaryDirectory() as temp:
@@ -544,12 +628,90 @@ class CoduTests(unittest.TestCase):
         self.assertIn("已知大小 1.0K，1 个会话大小未知", browser.confirm_delete.call_args.args[0])
         action.assert_not_called()
 
+    @unittest.skipUnless(os.name != "nt" and hasattr(socket, "AF_UNIX"), "Unix socket required")
+    def test_shared_websocket_lists_sessions_without_starting_a_process(self) -> None:
+        def respond(message):
+            if "id" not in message:
+                return None
+            result = {}
+            if message["method"] == "thread/list":
+                archived = message["params"]["archived"]
+                result = {"data": [] if archived else [{
+                    "id": "shared", "cwd": "/repo", "updatedAt": 1_790_251_200,
+                    "name": "Shared session",
+                }], "nextCursor": None}
+            return {"id": message["id"], "result": result}
+
+        with shared_socket_server(respond) as (root, _path, messages):
+            with (
+                patch.dict(os.environ, {"CODEX_HOME": str(root), "CODEX_BIN": "fake-codex"}),
+                patch.object(codu.subprocess, "Popen") as spawn,
+            ):
+                rows = codu.discover_sessions_from_app_server()
+            spawn.assert_not_called()
+        self.assertEqual([row.session_id for row in rows], ["shared"])
+        self.assertEqual([item["method"] for item in messages],
+                         ["initialize", "initialized", "thread/list", "thread/list"])
+
+    @unittest.skipUnless(os.name != "nt" and hasattr(socket, "AF_UNIX"), "Unix socket required")
+    def test_shared_initialize_timeout_falls_back_to_stdio(self) -> None:
+        with shared_socket_server(lambda message: None) as (root, _path, messages):
+            executable = write_fake_codex(root)
+            updates = []
+            with (
+                patch.dict(os.environ, {"CODEX_HOME": str(root), "CODEX_BIN": str(executable)}),
+                patch.object(codu, "SHARED_HANDSHAKE_TIMEOUT", 0.1),
+                patch.object(codu.subprocess, "Popen", wraps=subprocess.Popen) as spawn,
+            ):
+                started = time.monotonic()
+                self.assertEqual(codu.discover_sessions_from_app_server(progress=updates.append), [])
+                self.assertLess(time.monotonic() - started, 1.5)
+            spawn.assert_called_once()
+            self.assertEqual(spawn.call_args.args[0], [str(executable), "app-server"])
+        self.assertEqual([item["method"] for item in messages], ["initialize"])
+        self.assertIn("共享连接不可用，正在启动独立 Codex 服务", updates)
+
+    @unittest.skipUnless(os.name != "nt" and hasattr(socket, "AF_UNIX"), "Unix socket required")
+    def test_shared_upgrade_and_initialize_share_one_deadline(self) -> None:
+        def respond(message):
+            if message.get("method") == "initialize":
+                threading.Event().wait(0.25)
+                return {"id": message["id"], "result": {}}
+            return None
+
+        with (
+            shared_socket_server(respond, upgrade_delay=0.25) as (_root, path, _messages),
+            patch.object(codu, "SHARED_HANDSHAKE_TIMEOUT", 0.4),
+            self.assertRaisesRegex(codu.AppServerError, "timed out"),
+            codu.AppServerClient(socket_path=path, timeout=2),
+        ):
+            self.fail("each handshake phase incorrectly received its own timeout")
+
+    @unittest.skipUnless(os.name != "nt" and hasattr(socket, "AF_UNIX"), "Unix socket required")
+    def test_shared_query_keeps_longer_timeout_after_short_handshake(self) -> None:
+        def respond(message):
+            if "id" not in message:
+                return None
+            if message["method"] == "thread/list":
+                threading.Event().wait(0.2)
+                return {"id": message["id"], "result": {"data": [], "nextCursor": None}}
+            return {"id": message["id"], "result": {}}
+
+        with shared_socket_server(respond) as (_root, path, _messages):
+            with (
+                patch.object(codu, "SHARED_HANDSHAKE_TIMEOUT", 0.1),
+                codu.AppServerClient(socket_path=path, timeout=1) as client,
+            ):
+                result = client.request("thread/list", {})
+                self.assertEqual(result["data"], [])
+            self.assertTrue(client.closed)
+
     def test_app_server_launches_platform_executable(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             executable = write_fake_codex(Path(temp))
 
             with (
-                patch.dict(os.environ, {"CODEX_BIN": ""}),
+                patch.dict(os.environ, {"CODEX_BIN": "", "CODEX_HOME": temp}),
                 patch.object(codu.shutil, "which", return_value=str(executable)),
             ):
                 sessions = codu.discover_sessions_from_app_server()
