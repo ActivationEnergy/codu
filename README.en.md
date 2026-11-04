@@ -57,15 +57,15 @@ The formula source is [`packaging/homebrew/codu.rb`](packaging/homebrew/codu.rb)
 The recommended path is to install the versioned universal wheel with `uv`:
 
 ```console
-uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.4/codu-0.3.4-py3-none-any.whl
+uv tool install https://github.com/ActivationEnergy/codu/releases/download/v0.3.5/codu-0.3.5-py3-none-any.whl
 codu --version
 ```
 
 Regular `pip` and `pipx` are also supported:
 
 ```console
-python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.4/codu-0.3.4-py3-none-any.whl
-pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.4/codu-0.3.4-py3-none-any.whl
+python -m pip install https://github.com/ActivationEnergy/codu/releases/download/v0.3.5/codu-0.3.5-py3-none-any.whl
+pipx install https://github.com/ActivationEnergy/codu/releases/download/v0.3.5/codu-0.3.5-py3-none-any.whl
 ```
 
 On Windows, use Windows Terminal with PowerShell; replace `python` with `py` in the command above when needed.

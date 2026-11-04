@@ -50,7 +50,7 @@ INJECTED_USER_PREFIXES = (
 
 DEFAULT_OPERATION_TIMEOUT = 30.0
 SHARED_HANDSHAKE_TIMEOUT = 2.0
-__version__ = "0.3.4"
+__version__ = "0.3.5"
 
 
 @dataclass(frozen=True)
