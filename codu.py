@@ -50,7 +50,7 @@ INJECTED_USER_PREFIXES = (
 
 DEFAULT_OPERATION_TIMEOUT = 30.0
 SHARED_HANDSHAKE_TIMEOUT = 2.0
-__version__ = "0.3.5"
+__version__ = "0.3.6"
 
 
 @dataclass(frozen=True)
@@ -1107,6 +1107,24 @@ def run_codex_action(arguments: Sequence[str]) -> tuple[bool, str]:
     return False, output or f"codex 返回状态码 {result.returncode}"
 
 
+def delete_session(session_id: str, root: Path) -> tuple[bool, str]:
+    """Delete through the listing service, falling back only before a request is sent."""
+    try:
+        client = AppServerClient(socket_path=root / "app-server-control/app-server-control.sock")
+        client.__enter__()
+    except AppServerError:
+        return run_codex_action(["delete", "--force", session_id])
+
+    try:
+        client.request("thread/delete", {"threadId": session_id})
+        return True, ""
+    except AppServerError as error:
+        # A timeout can mean the deletion completed. Never retry through another server.
+        return False, normalize_text(str(error))
+    finally:
+        client.close()
+
+
 class SessionBrowser:
     """An ncdu-style curses browser for Codex sessions."""
 
@@ -1267,9 +1285,9 @@ class SessionBrowser:
             self.draw_list()
 
         footer = self.message or (
-            "Tab 视图  j/k 上下  h 上级  l/Enter 打开  i 说明  R 建议  1-4/<> 排序  ? 帮助"
+            "/ 搜索  Esc 清除搜索  Tab 视图  j/k 上下  h 上级  l/Enter 打开  i 说明  ? 帮助"
             if self.view == "data"
-            else "Tab 视图  j/k 上下  l/Enter 详情  1-5/<> 排序列  o 顺逆序  d 删除  ? 帮助"
+            else "/ 搜索  Esc 清除搜索  Tab 视图  j/k 上下  l/Enter 详情  d 删除  ? 帮助"
         )
         self.safe_addstr(height - 1, 0, footer, curses.A_REVERSE)
         self.screen.refresh()
@@ -1494,19 +1512,37 @@ class SessionBrowser:
         self.message = "按 Esc、←、q 或 ? 返回"
 
     def prompt(self, label: str) -> str:
+        """Read a Unicode search query; Escape clears it without requiring Enter."""
         import curses
 
-        height, width = self.screen.getmaxyx()
-        self.screen.move(height - 1, 0)
-        self.screen.clrtoeol()
-        self.safe_addstr(height - 1, 0, label, curses.A_REVERSE)
-        curses.echo()
+        query = ""
+        curses.noecho()
         self.set_cursor_visibility(True)
         try:
-            raw = self.screen.getstr(height - 1, min(len(label), width - 1), max(1, width - len(label) - 1))
-            return raw.decode("utf-8", errors="replace")
+            while True:
+                height, width = self.screen.getmaxyx()
+                available = max(0, width - display_width(label) - 1)
+                visible = (
+                    fit_text_end(query, available)
+                    if display_width(query) > available else query
+                )
+                self.screen.move(height - 1, 0)
+                self.screen.clrtoeol()
+                self.safe_addstr(height - 1, 0, label + visible, curses.A_REVERSE)
+                self.screen.move(
+                    height - 1, min(width - 1, display_width(label + visible))
+                )
+                self.screen.refresh()
+                key = self.screen.get_wch()
+                if key == "\x1b":
+                    return ""
+                if key in ("\n", "\r", curses.KEY_ENTER):
+                    return query
+                if key in ("\b", "\x7f", curses.KEY_BACKSPACE):
+                    query = query[:-1]
+                elif isinstance(key, str) and key.isprintable():
+                    query += key
         finally:
-            curses.noecho()
             self.set_cursor_visibility(False)
 
     def confirm_delete(self, label: str) -> bool:
@@ -1552,7 +1588,7 @@ class SessionBrowser:
         deleted: set[str] = set()
         errors: list[str] = []
         for session in targets:
-            ok, detail = run_codex_action(["delete", "--force", session.session_id])
+            ok, detail = delete_session(session.session_id, self.root)
             if ok:
                 deleted.add(session.session_id)
             else:

@@ -137,11 +137,15 @@ usage: codu [-h] [--json | --plain] [--verbose] [--version] [directory]
 | `Tab` | Switch between Sessions and Codex Data |
 | `PgUp` / `PgDn` | Move one page |
 | `Home` / `End`, `g` / `G` | Jump to first/last row |
-| `Esc` | Return from details; clear search first in a list |
-| `/` | Search the current view |
+| `Esc` | Return from details; cancel search input or clear a list's filter and restore all entries |
+| `/` | Search the current view; type a query and press `Enter` to filter |
 | `Space` | Mark or unmark a session in the Sessions view |
 | `?` | Open help |
 | `q` | Go back or quit |
+
+Session search matches names, IDs, directories, and status, ignoring case. Press `Esc` during input or after filtering to clear the query and restore all sessions, including after a search with no matches.
+
+Automatic approval sessions named `Guardian review` can also be deleted: search for `guardian review` with `/`, press `Enter`, select a record, then press `d` and confirm. Records with the same name are deleted by their individual UUIDs. Use `Space` to mark several records for batch deletion.
 
 ### Sorting
 
@@ -228,8 +232,8 @@ Session sizes are numeric only after a successful file stat (including genuine `
 
 - Browsing, filtering, and exporting do not directly modify transcript logs. app-server may maintain or repair its own metadata indexes.
 - Archive and restore operations are reversible and run through the Codex CLI.
-- Delete runs `codex delete --force <UUID>` and is permanent. Under Codex thread deletion semantics, it may also delete descendant threads.
-- Codex Data does not delete files under `CODEX_HOME` directly. Session deletion always uses the Codex CLI; unverified cache paths remain read-only.
+- Delete prefers `thread/delete` on the shared Codex service and falls back to `codex delete --force <UUID>` only when that service cannot be connected. This avoids operation differences between the listing service and a different CLI version on PATH. A rejected or timed-out request is never retried through another path; failed records stay in the list. Deletion is permanent and may also delete descendant threads under Codex thread deletion semantics.
+- Codex Data does not delete files under `CODEX_HOME` directly. Session deletion always uses Codex interfaces; unverified cache paths remain read-only.
 - `STATUS=active...` only means the **connected app-server** considers the session active. `notLoaded` or `unknown` does not prove another Codex process is not using it.
 - `A` disables later confirmations only for the current process. Once enabled, pay close attention to the cursor and marked sessions.
 - codu passes arguments to `codex` as an argument array; it does not interpolate session IDs or paths into a shell command.

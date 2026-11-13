@@ -14,7 +14,7 @@ import time
 import unittest
 from contextlib import closing
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import codu
 
@@ -755,6 +755,121 @@ class CoduTests(unittest.TestCase):
         )
         self.assertEqual(codu.display_width("中文a"), 5)
         self.assertEqual(codu.display_width(codu.fit_text("中文a", 4)), 4)
+
+    def test_slash_search_and_escape_restore_all_sessions(self) -> None:
+        import curses
+
+        first = codu.Session(
+            updated=codu.datetime.now(codu.UTC), state="active", status="notLoaded",
+            session_id="first", size_bytes=10, title="中文会话", cwd="/repo", path=None,
+        )
+        second = codu.replace(first, session_id="second", title="Parser work")
+        screen = Mock()
+        screen.getmaxyx.return_value = (24, 100)
+        browser = codu.SessionBrowser(screen, [first, second])
+        browser.selected = browser.offset = 1
+        screen.get_wch.side_effect = [*"中文", curses.KEY_BACKSPACE, "文", "\n"]
+        with patch("curses.noecho"), patch("curses.curs_set"):
+            self.assertTrue(browser.handle_key(ord("/")))
+        self.assertEqual(browser.query, "中文")
+        self.assertEqual(browser.visible, [first])
+        self.assertEqual((browser.selected, browser.offset), (0, 0))
+
+        self.assertTrue(browser.handle_key(27))
+        self.assertEqual(browser.query, "")
+        self.assertCountEqual(browser.visible, [first, second])
+        self.assertEqual(browser.mode, "list")
+
+        # Escape cancels even before Enter, including an existing filter.
+        browser.query = "Parser"
+        screen.get_wch.side_effect = [*"no matches", "\x1b"]
+        with patch("curses.noecho"), patch("curses.curs_set"):
+            self.assertTrue(browser.handle_key(ord("/")))
+        self.assertEqual(browser.query, "")
+        self.assertCountEqual(browser.visible, [first, second])
+
+        screen.get_wch.side_effect = [*"no matches", "\r"]
+        with patch("curses.noecho"), patch("curses.curs_set"):
+            browser.handle_key(ord("/"))
+        self.assertEqual(browser.visible, [])
+        browser.handle_key(27)
+        self.assertCountEqual(browser.visible, [first, second])
+
+    def test_search_prompt_handles_resize_and_long_unicode_input(self) -> None:
+        import curses
+
+        screen = Mock()
+        screen.getmaxyx.return_value = (24, 50)
+        query = "中文/" * 30
+        screen.get_wch.side_effect = [curses.KEY_RESIZE, *query, "\x7f", "\b", "\n"]
+        browser = codu.SessionBrowser(screen, [])
+        with patch("curses.noecho"), patch("curses.curs_set") as cursor:
+            self.assertEqual(browser.prompt("搜索: "), query[:-2])
+        cursor.assert_any_call(1)
+        cursor.assert_called_with(0)
+        for call in screen.move.call_args_list:
+            self.assertLess(call.args[1], 50)
+
+    def test_guardian_search_delete_uses_uuid_and_keeps_failed_rows(self) -> None:
+        guardian = codu.Session(
+            updated=codu.datetime.now(codu.UTC), state="active", status="notLoaded",
+            session_id="019a0000-0000-7000-8000-000000000001", size_bytes=104700,
+            title="Guardian review", cwd="/repo", path=None,
+        )
+        other = codu.replace(guardian, session_id="ordinary", title="Main session")
+        screen = Mock()
+        screen.getmaxyx.return_value = (24, 100)
+        browser = codu.SessionBrowser(screen, [guardian, other])
+        browser.query = "guardian review"
+        browser.confirm_delete = Mock(return_value=True)
+        with patch.object(codu, "delete_session", return_value=(False, "busy")) as action:
+            browser.handle_key(ord("d"))
+        action.assert_called_once_with(guardian.session_id, browser.root)
+        self.assertEqual(browser.visible, [guardian])
+        self.assertIn("失败 1 个", browser.message)
+        with patch.object(codu, "delete_session", return_value=(True, "deleted")):
+            browser.handle_key(ord("d"))
+        self.assertEqual(browser.sessions, [other])
+        browser.handle_key(27)
+        self.assertEqual(browser.visible, [other])
+
+    @unittest.skipUnless(os.name != "nt" and hasattr(socket, "AF_UNIX"), "Unix socket required")
+    def test_delete_uses_shared_service_instead_of_a_different_cli(self) -> None:
+        def respond(message):
+            return {"id": message["id"], "result": {}} if "id" in message else None
+
+        with (
+            shared_socket_server(respond) as (root, _path, messages),
+            patch.object(codu, "run_codex_action") as action,
+        ):
+            self.assertEqual(codu.delete_session("guardian-id", root), (True, ""))
+            action.assert_not_called()
+        self.assertEqual([item["method"] for item in messages],
+                         ["initialize", "initialized", "thread/delete"])
+        self.assertEqual(messages[-1]["params"], {"threadId": "guardian-id"})
+
+    def test_delete_does_not_retry_a_rejected_or_uncertain_request(self) -> None:
+        for reason in ("thread/delete: cannot delete running thread", "thread/delete: timed out"):
+            with self.subTest(reason=reason):
+                client = MagicMock()
+                client.request.side_effect = codu.AppServerError(reason)
+                with (
+                    patch.object(codu, "AppServerClient", return_value=client),
+                    patch.object(codu, "run_codex_action") as action,
+                ):
+                    self.assertEqual(codu.delete_session("guardian-id", Path("/codex")),
+                                     (False, reason))
+                    action.assert_not_called()
+                client.close.assert_called_once()
+
+    def test_delete_falls_back_when_shared_service_is_unavailable(self) -> None:
+        with (
+            patch.object(codu, "AppServerClient", side_effect=codu.AppServerError("unavailable")),
+            patch.object(codu, "run_codex_action", return_value=(True, "deleted")) as action,
+        ):
+            self.assertEqual(codu.delete_session("guardian-id", Path("/codex")),
+                             (True, "deleted"))
+        action.assert_called_once_with(["delete", "--force", "guardian-id"])
 
     def test_session_columns_prioritize_cwd_suffix(self) -> None:
         self.assertEqual(codu.session_column_widths(60)[1], 0)
